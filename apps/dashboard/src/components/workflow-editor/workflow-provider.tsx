@@ -22,6 +22,7 @@ import { CheckCircleIcon } from 'lucide-react';
 import { RiAlertFill, RiCloseFill } from 'react-icons/ri';
 import { toast } from 'sonner';
 import { showErrorToast, showSavingToast, showSuccessToast } from './toasts';
+import { WorkflowSchemaProvider } from './workflow-schema-provider';
 
 export type UpdateWorkflowFn = (
   data: UpdateWorkflowDto,
@@ -32,6 +33,7 @@ export type UpdateWorkflowFn = (
 
 export type WorkflowContextType = {
   isPending: boolean;
+  isUpdatePatchPending: boolean;
   workflow?: WorkflowResponseDto;
   step?: StepResponseDto;
   update: UpdateWorkflowFn;
@@ -203,8 +205,8 @@ export const WorkflowProvider = ({ children }: { children: ReactNode }) => {
   }, [isAllowedToUnblock, blocker]);
 
   const value = useMemo(
-    () => ({ update, patch, isPending, workflow, step: getStep(), digestStepBeforeCurrent }),
-    [update, patch, isPending, workflow, getStep, digestStepBeforeCurrent]
+    () => ({ update, patch, isPending, workflow, step: getStep(), digestStepBeforeCurrent, isUpdatePatchPending }),
+    [update, patch, isPending, workflow, getStep, digestStepBeforeCurrent, isUpdatePatchPending]
   );
 
   return (
@@ -214,7 +216,9 @@ export const WorkflowProvider = ({ children }: { children: ReactNode }) => {
         isUpdatePatchPending={isUpdatePatchPending}
         onCancel={handleCancelNavigation}
       />
-      <WorkflowContext.Provider value={value}>{children}</WorkflowContext.Provider>
+      <WorkflowContext.Provider value={value}>
+        <WorkflowSchemaProvider>{children}</WorkflowSchemaProvider>
+      </WorkflowContext.Provider>
     </>
   );
 };

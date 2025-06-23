@@ -14,6 +14,7 @@ import { Dialog, DialogContent, DialogTitle, DialogClose, DialogHeader } from '@
 import { CopyToClipboard } from '../primitives/copy-to-clipboard';
 import { Button } from '@/components/primitives/button';
 import { toast } from 'sonner';
+import { showErrorToast, showSuccessToast } from '@/components/primitives/sonner-helpers';
 import { triggerWorkflow } from '../../api/workflows';
 import { QueryKeys } from '@/utils/query-keys';
 import { getActivityList } from '@/api/activity';
@@ -89,9 +90,10 @@ export function ActivityLogs({
       closePopover();
       setIsFullscreenOpen(false);
 
-      toast.success('Notification resent successfully', {
-        description: `A new notification has been triggered with transaction ID: ${newTransactionId}`,
-      });
+      showSuccessToast(
+        `A new notification has been triggered with transaction ID: ${newTransactionId}`,
+        'Notification resent successfully'
+      );
 
       const checkAndUpdateTransaction = async () => {
         if (currentEnvironment) {
@@ -116,9 +118,10 @@ export function ActivityLogs({
       setTimeout(checkAndUpdateTransaction, 1000);
     },
     onError: (error: Error) => {
-      toast.error('Failed to trigger resend workflow', {
-        description: error.message || 'There was an error triggering the resend workflow.',
-      });
+      showErrorToast(
+        error.message || 'There was an error triggering the resend workflow.',
+        'Failed to trigger resend workflow'
+      );
     },
   });
 
@@ -133,7 +136,7 @@ export function ActivityLogs({
           <span className="text-foreground-950 text-sm font-medium">Logs</span>
         </div>
 
-        <Popover open={isPopoverOpen} onOpenChange={(open) => setIsPopoverOpen(open)}>
+        <Popover modal={true} open={isPopoverOpen} onOpenChange={(open) => setIsPopoverOpen(open)}>
           <PopoverTrigger asChild>
             <div className="flex items-center gap-1">
               <RiCodeBlock className="size-3" />
@@ -213,7 +216,7 @@ export function ActivityLogs({
         {children}
       </motion.div>
 
-      <Dialog open={isFullscreenOpen} onOpenChange={setIsFullscreenOpen}>
+      <Dialog modal={false} open={isFullscreenOpen} onOpenChange={setIsFullscreenOpen}>
         <DialogContent className="flex max-h-[90vh] w-[90%] flex-col overflow-hidden p-0 [&>button.absolute.right-4.top-4]:hidden">
           <DialogHeader className="flex-none border-b border-neutral-100 p-3">
             <div className="flex items-center justify-between">

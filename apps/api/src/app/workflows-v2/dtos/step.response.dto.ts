@@ -6,7 +6,7 @@ import { ControlsMetadataDto } from './controls-metadata.dto';
 import { JSONSchemaDto } from './json-schema.dto';
 import { StepIssuesDto } from './step-issues.dto';
 
-export class StepResponseDto {
+export class StepResponseDto<T = Record<string, unknown>> {
   @ApiProperty({
     description: 'Controls metadata for the step',
     type: () => ControlsMetadataDto,
@@ -16,9 +16,17 @@ export class StepResponseDto {
   @Type(() => ControlsMetadataDto)
   controls: ControlsMetadataDto;
 
+  @ApiPropertyOptional({
+    description: 'Control values for the step (alias for controls.values)',
+    type: 'object',
+    additionalProperties: true,
+  })
+  controlValues?: T;
+
   @ApiProperty({
-    description: 'JSON Schema for variables',
-    type: () => JSONSchemaDto, // Use arrow function for type
+    description: 'JSON Schema for variables, follows the JSON Schema standard',
+    additionalProperties: true,
+    type: () => Object, // Use arrow function for type
   })
   @ValidateNested() // Consider adding options if needed
   @Type(() => JSONSchemaDto) // Import class-transformer decorator

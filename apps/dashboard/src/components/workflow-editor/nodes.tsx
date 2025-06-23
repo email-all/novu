@@ -1,4 +1,4 @@
-import { WorkflowOriginEnum } from '@novu/shared';
+import { FeatureFlagsKeysEnum, PermissionsEnum, WorkflowOriginEnum } from '@novu/shared';
 import { Node as FlowNode, Handle, NodeProps, Position } from '@xyflow/react';
 import { ComponentProps } from 'react';
 import { RiFilter3Fill, RiPlayCircleLine } from 'react-icons/ri';
@@ -17,6 +17,14 @@ import { cn } from '@/utils/ui';
 import { STEP_TYPE_TO_ICON } from '../icons/utils';
 import { AddStepMenu } from './add-step-menu';
 import { Node, NodeBody, NodeError, NodeHeader, NodeIcon, NodeName } from './base-node';
+import { useHasPermission } from '@/hooks/use-has-permission';
+import { WorkflowNodeActionBar } from './workflow-node-action-bar';
+import { useEnvironment } from '@/context/environment/hooks';
+import { AnimatePresence } from 'motion/react';
+import { ConfirmationModal } from '@/components/confirmation-modal';
+import { useState, useCallback, useRef } from 'react';
+import { StepCreateDto } from '@novu/shared';
+import { useFeatureFlag } from '@/hooks/use-feature-flag';
 
 export type NodeData = {
   addStepIndex?: number;
@@ -27,7 +35,7 @@ export type NodeData = {
   controlValues?: Record<string, any>;
   workflowSlug?: string;
   environment?: string;
-  readOnly?: boolean;
+  isTemplateStorePreview?: boolean;
 };
 
 export type NodeType = FlowNode<NodeData>;
@@ -40,7 +48,9 @@ const handleClassName = `${topHandleClasses} ${bottomHandleClasses}`;
 
 export const TriggerNode = ({
   data,
-}: NodeProps<FlowNode<{ environmentSlug: string; workflowSlug: string; readOnly?: boolean }>>) => {
+}: NodeProps<FlowNode<{ environmentSlug: string; workflowSlug: string; isTemplateStorePreview?: boolean }>>) => {
+  const isV2TemplateEditorEnabled = useFeatureFlag(FeatureFlagsKeysEnum.IS_V2_TEMPLATE_EDITOR_ENABLED);
+
   const content = (
     <Node
       className="relative rounded-tl-none [&>span]:rounded-tl-none"
@@ -54,20 +64,20 @@ export const TriggerNode = ({
       <NodeHeader type={StepTypeEnum.TRIGGER}>
         <NodeName>Workflow trigger</NodeName>
       </NodeHeader>
-      <NodeBody type={StepTypeEnum.TRIGGER} controlValues={{}} showPreview={data.readOnly}>
+      <NodeBody type={StepTypeEnum.TRIGGER} controlValues={{}} showPreview={data.isTemplateStorePreview}>
         This step triggers this workflow
       </NodeBody>
       <Handle isConnectable={false} className={handleClassName} type="source" position={Position.Bottom} id="b" />
     </Node>
   );
 
-  if (data.readOnly) {
+  if (data.isTemplateStorePreview) {
     return content;
   }
 
   return (
     <Link
-      to={buildRoute(ROUTES.TEST_WORKFLOW, {
+      to={buildRoute(isV2TemplateEditorEnabled ? ROUTES.TRIGGER_WORKFLOW : ROUTES.TEST_WORKFLOW, {
         environmentSlug: data.environmentSlug,
         workflowSlug: data.workflowSlug,
       })}
@@ -77,14 +87,23 @@ export const TriggerNode = ({
   );
 };
 
-type StepNodeProps = ComponentProps<typeof Node> & { data: NodeData };
+type StepNodeProps = ComponentProps<typeof Node> & {
+  data: NodeData;
+  type?: StepTypeEnum;
+};
 
 const StepNode = (props: StepNodeProps) => {
   const navigate = useNavigate();
-  const { className, data, ...rest } = props;
+  const { className, data, type, ...rest } = props;
   const { stepSlug } = useParams<{
     stepSlug: string;
   }>();
+  const { workflow: currentWorkflow, update } = useWorkflow();
+  const { currentEnvironment } = useEnvironment();
+  const has = useHasPermission();
+  const isV2TemplateEditorEnabled = useFeatureFlag(FeatureFlagsKeysEnum.IS_V2_TEMPLATE_EDITOR_ENABLED);
+  const [isHovered, setIsHovered] = useState(false);
+  const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const conditionsCount = useConditionsCount(data.controlValues?.skip as RQBJsonLogic);
 
@@ -95,33 +114,209 @@ const StepNode = (props: StepNodeProps) => {
     !!data.stepSlug;
 
   const hasConditions = conditionsCount > 0;
+  const isReadOnly =
+    currentWorkflow?.origin === WorkflowOriginEnum.EXTERNAL || !has({ permission: PermissionsEnum.WORKFLOW_WRITE });
+
+  const handleMouseEnter = () => {
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current);
+    }
+
+    hoverTimeoutRef.current = setTimeout(() => {
+      setIsHovered(true);
+    }, 150);
+  };
+
+  const handleMouseLeave = () => {
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current);
+      hoverTimeoutRef.current = null;
+    }
+
+    setIsHovered(false);
+  };
+
+  const handleRemoveStep = useCallback(() => {
+    if (!data.stepSlug || !currentWorkflow) {
+      return;
+    }
+
+    update(
+      {
+        ...currentWorkflow,
+        steps: currentWorkflow.steps.filter((s) => s.slug !== data.stepSlug),
+      },
+      {
+        onSuccess: () => {
+          if (currentEnvironment?.slug && currentWorkflow?.slug) {
+            navigate(
+              buildRoute(ROUTES.EDIT_WORKFLOW, {
+                environmentSlug: currentEnvironment.slug,
+                workflowSlug: currentWorkflow.slug,
+              })
+            );
+          }
+        },
+      }
+    );
+  }, [data.stepSlug, currentWorkflow, currentEnvironment?.slug, update, navigate]);
+
+  const handleCopyStep = useCallback(() => {
+    if (!data.stepSlug || !currentWorkflow || !type) {
+      return;
+    }
+
+    const currentStepIndex = currentWorkflow.steps.findIndex((s) => s.slug === data.stepSlug);
+
+    if (currentStepIndex === -1) {
+      return;
+    }
+
+    const currentStep = currentWorkflow.steps[currentStepIndex];
+
+    // Create a new step by copying the current step structure
+    const copiedStep: StepCreateDto = {
+      name: `${currentStep.name} (Copy)`,
+      type: currentStep.type,
+      controlValues: { ...currentStep.controls.values },
+    };
+
+    // Insert the copied step immediately after the current step
+    const newSteps = [...currentWorkflow.steps];
+    newSteps.splice(currentStepIndex + 1, 0, copiedStep as any);
+
+    update(
+      {
+        ...currentWorkflow,
+        steps: newSteps,
+      },
+      {
+        onSuccess: (updatedWorkflow) => {
+          // Navigate to the newly created step
+          const newStep = updatedWorkflow.steps[currentStepIndex + 1];
+
+          if (newStep && currentEnvironment?.slug) {
+            const isTemplateConfigurable = TEMPLATE_CONFIGURABLE_STEP_TYPES.includes(type);
+
+            if (isTemplateConfigurable) {
+              if (isV2TemplateEditorEnabled) {
+                navigate(
+                  buildRoute(ROUTES.EDIT_STEP_TEMPLATE_V2, {
+                    stepSlug: newStep.slug,
+                  })
+                );
+              } else {
+                navigate(
+                  buildRoute(ROUTES.EDIT_STEP_TEMPLATE, {
+                    stepSlug: newStep.slug,
+                  })
+                );
+              }
+            } else if (INLINE_CONFIGURABLE_STEP_TYPES.includes(type)) {
+              navigate(
+                buildRoute(ROUTES.EDIT_STEP, {
+                  stepSlug: newStep.slug,
+                })
+              );
+            }
+          }
+        },
+      }
+    );
+  }, [data.stepSlug, currentWorkflow, type, currentEnvironment?.slug, update, navigate, isV2TemplateEditorEnabled]);
+
+  const handleEditContent = useCallback(() => {
+    if (!data.stepSlug || !currentEnvironment?.slug || !type) {
+      return;
+    }
+
+    const isTemplateConfigurable = TEMPLATE_CONFIGURABLE_STEP_TYPES.includes(type);
+
+    if (isTemplateConfigurable) {
+      if (isV2TemplateEditorEnabled && currentWorkflow) {
+        navigate(
+          buildRoute(ROUTES.EDIT_STEP_TEMPLATE_V2, {
+            stepSlug: data.stepSlug,
+          })
+        );
+      } else {
+        navigate(
+          buildRoute(ROUTES.EDIT_STEP_TEMPLATE, {
+            stepSlug: data.stepSlug,
+          })
+        );
+      }
+    } else {
+      navigate(
+        buildRoute(ROUTES.EDIT_STEP, {
+          stepSlug: data.stepSlug,
+        })
+      );
+    }
+  }, [data.stepSlug, currentEnvironment?.slug, navigate, type, isV2TemplateEditorEnabled, currentWorkflow]);
 
   if (hasConditions) {
     return (
-      <Node
-        aria-selected={isSelected}
-        className={cn('group rounded-tl-none [&>span]:rounded-tl-none', className)}
-        pill={
-          <>
-            <RiFilter3Fill className="text-foreground-400 size-3" />
-            <span className="text-foreground-400 text-xs">{conditionsCount}</span>
-          </>
-        }
-        onPillClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          navigate(buildRoute(ROUTES.EDIT_STEP_CONDITIONS, { stepSlug: data.stepSlug ?? '' }));
-        }}
-        {...rest}
-      />
+      <>
+        <div className="relative pt-1" onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
+          <Node
+            aria-selected={isSelected}
+            className={cn('group rounded-tl-none [&>span]:rounded-tl-none', className)}
+            pill={
+              <>
+                <RiFilter3Fill className="text-foreground-400 size-3" />
+                <span className="text-foreground-400 text-xs">{conditionsCount}</span>
+              </>
+            }
+            onPillClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              navigate(buildRoute(ROUTES.EDIT_STEP_CONDITIONS, { stepSlug: data.stepSlug ?? '' }));
+            }}
+            {...rest}
+          >
+            {rest.children}
+          </Node>
+          <AnimatePresence>
+            {isHovered && !isReadOnly && !data.isTemplateStorePreview && type && (
+              <WorkflowNodeActionBar
+                stepType={type}
+                stepName={data.name || 'Untitled Step'}
+                onRemoveClick={handleRemoveStep}
+                onEditContentClick={handleEditContent}
+                onCopyClick={handleCopyStep}
+              />
+            )}
+          </AnimatePresence>
+        </div>
+      </>
     );
   }
 
-  return <Node aria-selected={isSelected} className={cn('group', className)} {...rest} />;
+  return (
+    <>
+      <div className="relative pt-1" onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
+        <Node aria-selected={isSelected} className={cn('group', className)} {...rest}>
+          {rest.children}
+        </Node>
+        <AnimatePresence>
+          {isHovered && !isReadOnly && !data.isTemplateStorePreview && type && (
+            <WorkflowNodeActionBar
+              stepType={type}
+              stepName={data.name || 'Untitled Step'}
+              onRemoveClick={handleRemoveStep}
+              onEditContentClick={handleEditContent}
+              onCopyClick={handleCopyStep}
+            />
+          )}
+        </AnimatePresence>
+      </div>
+    </>
+  );
 };
 
 const NodeWrapper = ({ children, data, type }: { children: React.ReactNode; data: NodeData; type: StepTypeEnum }) => {
-  if (data.readOnly) {
+  if (data.isTemplateStorePreview) {
     return children;
   }
 
@@ -145,7 +340,7 @@ export const EmailNode = ({ data }: NodeProps<NodeType>) => {
 
   return (
     <NodeWrapper data={data} type={StepTypeEnum.EMAIL}>
-      <StepNode data={data}>
+      <StepNode data={data} type={StepTypeEnum.EMAIL}>
         <NodeHeader type={StepTypeEnum.EMAIL}>
           <NodeIcon variant={STEP_TYPE_TO_COLOR[StepTypeEnum.EMAIL]}>
             <Icon />
@@ -154,7 +349,11 @@ export const EmailNode = ({ data }: NodeProps<NodeType>) => {
           <NodeName>{data.name || 'Email Step'}</NodeName>
         </NodeHeader>
 
-        <NodeBody type={StepTypeEnum.EMAIL} showPreview={data.readOnly} controlValues={data.controlValues ?? {}}>
+        <NodeBody
+          type={StepTypeEnum.EMAIL}
+          showPreview={data.isTemplateStorePreview}
+          controlValues={data.controlValues ?? {}}
+        >
           {data.content}
         </NodeBody>
         {data.error && <NodeError>{data.error}</NodeError>}
@@ -171,14 +370,18 @@ export const SmsNode = (props: NodeProps<NodeType>) => {
 
   return (
     <NodeWrapper data={data} type={StepTypeEnum.SMS}>
-      <StepNode data={data}>
+      <StepNode data={data} type={StepTypeEnum.SMS}>
         <NodeHeader type={StepTypeEnum.SMS}>
           <NodeIcon variant={STEP_TYPE_TO_COLOR[StepTypeEnum.SMS]}>
             <Icon />
           </NodeIcon>
           <NodeName>{data.name || 'SMS Step'}</NodeName>
         </NodeHeader>
-        <NodeBody showPreview={data.readOnly} type={StepTypeEnum.SMS} controlValues={data.controlValues ?? {}}>
+        <NodeBody
+          showPreview={data.isTemplateStorePreview}
+          type={StepTypeEnum.SMS}
+          controlValues={data.controlValues ?? {}}
+        >
           {data.content}
         </NodeBody>
         {data.error && <NodeError>{data.error}</NodeError>}
@@ -195,14 +398,18 @@ export const InAppNode = (props: NodeProps<NodeType>) => {
 
   return (
     <NodeWrapper data={data} type={StepTypeEnum.IN_APP}>
-      <StepNode data={data}>
+      <StepNode data={data} type={StepTypeEnum.IN_APP}>
         <NodeHeader type={StepTypeEnum.IN_APP}>
           <NodeIcon variant={STEP_TYPE_TO_COLOR[StepTypeEnum.IN_APP]}>
             <Icon />
           </NodeIcon>
           <NodeName>{data.name || 'In-App Step'}</NodeName>
         </NodeHeader>
-        <NodeBody showPreview={data.readOnly} type={StepTypeEnum.IN_APP} controlValues={data.controlValues ?? {}}>
+        <NodeBody
+          showPreview={data.isTemplateStorePreview}
+          type={StepTypeEnum.IN_APP}
+          controlValues={data.controlValues ?? {}}
+        >
           {data.content}
         </NodeBody>
         {data.error && <NodeError>{data.error}</NodeError>}
@@ -219,14 +426,18 @@ export const PushNode = (props: NodeProps<NodeType>) => {
 
   return (
     <NodeWrapper data={data} type={StepTypeEnum.PUSH}>
-      <StepNode data={data}>
+      <StepNode data={data} type={StepTypeEnum.PUSH}>
         <NodeHeader type={StepTypeEnum.PUSH}>
           <NodeIcon variant={STEP_TYPE_TO_COLOR[StepTypeEnum.PUSH]}>
             <Icon />
           </NodeIcon>
           <NodeName>{data.name || 'Push Step'}</NodeName>
         </NodeHeader>
-        <NodeBody showPreview={data.readOnly} type={StepTypeEnum.PUSH} controlValues={data.controlValues ?? {}}>
+        <NodeBody
+          showPreview={data.isTemplateStorePreview}
+          type={StepTypeEnum.PUSH}
+          controlValues={data.controlValues ?? {}}
+        >
           {data.content}
         </NodeBody>
         {data.error && <NodeError>{data.error}</NodeError>}
@@ -243,14 +454,18 @@ export const ChatNode = (props: NodeProps<NodeType>) => {
 
   return (
     <NodeWrapper data={data} type={StepTypeEnum.CHAT}>
-      <StepNode data={data}>
+      <StepNode data={data} type={StepTypeEnum.CHAT}>
         <NodeHeader type={StepTypeEnum.CHAT}>
           <NodeIcon variant={STEP_TYPE_TO_COLOR[StepTypeEnum.CHAT]}>
             <Icon />
           </NodeIcon>
           <NodeName>{data.name || 'Chat Step'}</NodeName>
         </NodeHeader>
-        <NodeBody showPreview={data.readOnly} type={StepTypeEnum.CHAT} controlValues={data.controlValues ?? {}}>
+        <NodeBody
+          showPreview={data.isTemplateStorePreview}
+          type={StepTypeEnum.CHAT}
+          controlValues={data.controlValues ?? {}}
+        >
           {data.content}
         </NodeBody>
         {data.error && <NodeError>{data.error}</NodeError>}
@@ -267,7 +482,7 @@ export const DelayNode = (props: NodeProps<NodeType>) => {
 
   return (
     <NodeWrapper data={data} type={StepTypeEnum.DELAY}>
-      <StepNode data={data}>
+      <StepNode data={data} type={StepTypeEnum.DELAY}>
         <NodeHeader type={StepTypeEnum.DELAY}>
           <NodeIcon variant={STEP_TYPE_TO_COLOR[StepTypeEnum.DELAY]}>
             <Icon />
@@ -291,7 +506,7 @@ export const DigestNode = (props: NodeProps<NodeType>) => {
 
   return (
     <NodeWrapper data={data} type={StepTypeEnum.DIGEST}>
-      <StepNode data={data}>
+      <StepNode data={data} type={StepTypeEnum.DIGEST}>
         <NodeHeader type={StepTypeEnum.DIGEST}>
           <NodeIcon variant={STEP_TYPE_TO_COLOR[StepTypeEnum.DIGEST]}>
             <Icon />
@@ -315,7 +530,7 @@ export const CustomNode = (props: NodeProps<NodeType>) => {
 
   return (
     <NodeWrapper data={data} type={StepTypeEnum.CUSTOM}>
-      <StepNode data={data}>
+      <StepNode data={data} type={StepTypeEnum.CUSTOM}>
         <NodeHeader type={StepTypeEnum.CUSTOM}>
           <NodeIcon variant={STEP_TYPE_TO_COLOR[StepTypeEnum.CUSTOM]}>
             <Icon />
@@ -336,12 +551,16 @@ export const CustomNode = (props: NodeProps<NodeType>) => {
 export const AddNode = (_props: NodeProps<NodeType>) => {
   const { workflow, update } = useWorkflow();
   const navigate = useNavigate();
+  const has = useHasPermission();
+  const { currentEnvironment } = useEnvironment();
+  const isV2TemplateEditorEnabled = useFeatureFlag(FeatureFlagsKeysEnum.IS_V2_TEMPLATE_EDITOR_ENABLED);
 
   if (!workflow) {
     return null;
   }
 
-  const isReadOnly = workflow.origin === WorkflowOriginEnum.EXTERNAL;
+  const isReadOnly =
+    workflow.origin === WorkflowOriginEnum.EXTERNAL || !has({ permission: PermissionsEnum.WORKFLOW_WRITE });
 
   if (isReadOnly) {
     return null;
@@ -361,11 +580,19 @@ export const AddNode = (_props: NodeProps<NodeType>) => {
             {
               onSuccess: (data) => {
                 if (TEMPLATE_CONFIGURABLE_STEP_TYPES.includes(stepType)) {
-                  navigate(
-                    buildRoute(ROUTES.EDIT_STEP_TEMPLATE, {
-                      stepSlug: data.steps[data.steps.length - 1].slug,
-                    })
-                  );
+                  if (isV2TemplateEditorEnabled && currentEnvironment?.slug) {
+                    navigate(
+                      buildRoute(ROUTES.EDIT_STEP_TEMPLATE_V2, {
+                        stepSlug: data.steps[data.steps.length - 1].slug,
+                      })
+                    );
+                  } else {
+                    navigate(
+                      buildRoute(ROUTES.EDIT_STEP_TEMPLATE, {
+                        stepSlug: data.steps[data.steps.length - 1].slug,
+                      })
+                    );
+                  }
                 } else if (INLINE_CONFIGURABLE_STEP_TYPES.includes(stepType)) {
                   navigate(
                     buildRoute(ROUTES.EDIT_STEP, {

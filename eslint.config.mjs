@@ -2,7 +2,6 @@
 import tsEslint from 'typescript-eslint';
 import jsEslint from '@eslint/js';
 import eslintPluginPrettierRecommended from 'eslint-plugin-prettier/recommended';
-import panda from '@pandacss/eslint-plugin';
 import pluginCypress from 'eslint-plugin-cypress/flat';
 import localRules from 'eslint-plugin-local-rules';
 
@@ -10,7 +9,6 @@ import localRules from 'eslint-plugin-local-rules';
 import reactHooks from 'eslint-plugin-react-hooks';
 import promise from 'eslint-plugin-promise';
 import unusedImports from 'eslint-plugin-unused-imports';
-import deprecation from 'eslint-plugin-deprecation';
 
 /**
  * Eslint v8 compatibility packages
@@ -115,13 +113,10 @@ export default tsEslint.config(
     },
 
     rules: {
-      '@typescript-eslint/await-thenable': 'warn',
       'unused-imports/no-unused-imports': 'off',
       '@typescript-eslint/space-before-blocks': 'off',
       '@typescript-eslint/lines-between-class-members': 'off',
       '@typescript-eslint/no-throw-literal': 'off',
-      '@typescript-eslint/only-throw-error': 'error',
-      '@typescript-eslint/no-floating-promises': 'warn',
       'react/jsx-wrap-multilines': 'off',
       'react/jsx-filename-extension': 'off',
       'multiline-comment-style': ['warn', 'starred-block'],
@@ -173,8 +168,6 @@ export default tsEslint.config(
       ],
 
       '@typescript-eslint/return-await': 'off',
-      '@typescript-eslint/no-base-to-string': 'error',
-
       'no-restricted-imports': [
         'error',
         {
@@ -275,16 +268,6 @@ export default tsEslint.config(
   },
 
   {
-    files: ['packages/providers/**'],
-    plugins: {
-      deprecation: fixupPluginRules(deprecation),
-    },
-    rules: {
-      'deprecation/deprecation': 'error',
-    },
-  },
-
-  {
     files: ['apps/api/**'],
     rules: {
       'no-restricted-imports': [
@@ -301,6 +284,11 @@ export default tsEslint.config(
               group: ['@novu/application-generic'],
               importNames: ['Logger'],
               message: 'Please use the PinoLogger from @novu/application-generic instead',
+            },
+            {
+              group: ['svix'],
+              importNames: ['Svix'],
+              message: 'Please use the SvixClient from @novu/application-generic instead',
             },
             {
               /**
@@ -343,17 +331,32 @@ export default tsEslint.config(
       ],
     },
   },
+  {
+    files: ['libs/application-generic/**'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['svix'],
+              importNames: ['Svix'],
+              message: 'Please use the SvixClient from @novu/application-generic instead',
+            },
+          ],
+        },
+      ],
+    },
+  },
 
   /* ******************** WEB PACKAGES ******************** */
   {
-    files: ['libs/design-system/**', 'libs/novui/**', 'apps/widget/**', 'apps/web/**'],
+    files: ['libs/design-system/**', 'libs/novui/**', 'apps/widget/**'],
     extends: [pluginCypress.configs.recommended],
     plugins: {
-      '@pandacss': panda,
       'react-hooks': fixupPluginRules(reactHooks),
     },
     rules: {
-      ...panda.configs.recommended.rules,
       'func-names': 'off',
       'react/jsx-props-no-spreading': 'off',
       'react/no-array-index-key': 'off',
@@ -384,8 +387,6 @@ export default tsEslint.config(
           format: ['PascalCase', 'camelCase', 'UPPER_CASE'],
         },
       ],
-
-      '@pandacss/no-config-function-in-source': 'off',
     },
   },
 

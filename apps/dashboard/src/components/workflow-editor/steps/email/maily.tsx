@@ -1,6 +1,5 @@
 import { HTMLAttributes, useCallback, useMemo, useState } from 'react';
 import { Editor } from '@maily-to/core';
-import { Editor as EditorDigest } from '@maily-to/core-digest';
 import type { Editor as TiptapEditor } from '@tiptap/core';
 import { Editor as TiptapEditorReact } from '@tiptap/react';
 
@@ -11,8 +10,12 @@ import { cn } from '@/utils/ui';
 import { createEditorBlocks, createExtensions, DEFAULT_EDITOR_CONFIG, MAILY_EMAIL_WIDTH } from './maily-config';
 import { calculateVariables, VariableFrom } from './variables/variables';
 import { RepeatMenuDescription } from './views/repeat-menu-description';
-import { FeatureFlagsKeysEnum } from '@novu/shared';
+import { useRemoveGrammarly } from '@/hooks/use-remove-grammarly';
+import { useWorkflowSchema } from '@/components/workflow-editor/workflow-schema-provider';
+import { PayloadSchemaDrawer } from '@/components/workflow-editor/payload-schema-drawer';
+import { useCreateVariable } from '@/components/variable/hooks/use-create-variable';
 import { useFeatureFlag } from '@/hooks/use-feature-flag';
+import { FeatureFlagsKeysEnum } from '@novu/shared';
 
 type MailyProps = HTMLAttributes<HTMLDivElement> & {
   value: string;
@@ -21,9 +24,39 @@ type MailyProps = HTMLAttributes<HTMLDivElement> & {
 };
 
 export const Maily = ({ value, onChange, className, ...rest }: MailyProps) => {
-  const { step, digestStepBeforeCurrent } = useWorkflow();
-  const isEnhancedDigestEnabled = useFeatureFlag(FeatureFlagsKeysEnum.IS_ENHANCED_DIGEST_ENABLED);
-  const parsedVariables = useParseVariables(step?.variables, digestStepBeforeCurrent?.stepId);
+  const { step, digestStepBeforeCurrent, workflow } = useWorkflow();
+  const {
+    addProperty: addSchemaProperty,
+    handleSaveChanges: handleSaveSchemaChanges,
+    isPayloadSchemaEnabled,
+    currentSchema,
+  } = useWorkflowSchema();
+
+  const {
+    handleCreateNewVariable,
+    isPayloadSchemaDrawerOpen,
+    highlightedVariableKey,
+    openSchemaDrawer,
+    closeSchemaDrawer,
+  } = useCreateVariable();
+
+  // Use currentSchema if available (when payload schema is enabled), otherwise fall back to step variables
+  const schemaToUse = useMemo(
+    () => (isPayloadSchemaEnabled && currentSchema ? { ...step?.variables, payload: currentSchema } : step?.variables),
+    [isPayloadSchemaEnabled, currentSchema, step?.variables]
+  );
+
+  const parsedVariables = useParseVariables(schemaToUse, digestStepBeforeCurrent?.stepId, isPayloadSchemaEnabled);
+
+  // Create a key that changes when variables change to force extension recreation
+  const variablesKey = useMemo(() => {
+    const variableNames = [...parsedVariables.primitives, ...parsedVariables.arrays, ...parsedVariables.namespaces]
+      .map((v) => v.name)
+      .sort()
+      .join(',');
+    return `vars-${variableNames.length}-${variableNames.slice(0, 100)}`; // Truncate to avoid overly long keys
+  }, [parsedVariables.primitives, parsedVariables.arrays, parsedVariables.namespaces]);
+
   const primitives = useMemo(
     () => parsedVariables.primitives.map((v) => ({ name: v.name, required: false })),
     [parsedVariables.primitives]
@@ -36,12 +69,15 @@ export const Maily = ({ value, onChange, className, ...rest }: MailyProps) => {
     () => parsedVariables.namespaces.map((v) => ({ name: v.name, required: false })),
     [parsedVariables.namespaces]
   );
+
   const [_, setEditor] = useState<any>();
   const track = useTelemetry();
 
   const blocks = useMemo(() => {
-    return createEditorBlocks({ track, digestStepBeforeCurrent, isEnhancedDigestEnabled });
-  }, [digestStepBeforeCurrent, isEnhancedDigestEnabled, track]);
+    return createEditorBlocks({ track, digestStepBeforeCurrent });
+  }, [digestStepBeforeCurrent, track]);
+
+  const editorParentRef = useRemoveGrammarly<HTMLDivElement>();
 
   const handleCalculateVariables = useCallback(
     ({ query, editor, from }: { query: string; editor: TiptapEditor; from: VariableFrom }) => {
@@ -53,8 +89,8 @@ export const Maily = ({ value, onChange, className, ...rest }: MailyProps) => {
         arrays,
         namespaces,
         isAllowedVariable: parsedVariables.isAllowedVariable,
-        isEnhancedDigestEnabled,
         addDigestVariables: !!digestStepBeforeCurrent?.stepId,
+        isPayloadSchemaEnabled,
       });
     },
     [
@@ -62,10 +98,12 @@ export const Maily = ({ value, onChange, className, ...rest }: MailyProps) => {
       arrays,
       namespaces,
       parsedVariables.isAllowedVariable,
-      isEnhancedDigestEnabled,
       digestStepBeforeCurrent?.stepId,
+      isPayloadSchemaEnabled,
     ]
   );
+
+  const isTranslationEnabled = useFeatureFlag(FeatureFlagsKeysEnum.IS_TRANSLATION_ENABLED);
 
   const extensions = useMemo(
     () =>
@@ -73,9 +111,18 @@ export const Maily = ({ value, onChange, className, ...rest }: MailyProps) => {
         handleCalculateVariables,
         parsedVariables,
         blocks,
-        isEnhancedDigestEnabled,
+        onCreateNewVariable: handleCreateNewVariable,
+        isPayloadSchemaEnabled,
+        isTranslationEnabled,
       }),
-    [handleCalculateVariables, parsedVariables, blocks, isEnhancedDigestEnabled]
+    [
+      handleCalculateVariables,
+      parsedVariables,
+      blocks,
+      isPayloadSchemaEnabled,
+      handleCreateNewVariable,
+      isTranslationEnabled,
+    ]
   );
 
   /*
@@ -86,6 +133,9 @@ export const Maily = ({ value, onChange, className, ...rest }: MailyProps) => {
   const overrideTippyBoxStyles = () => (
     <style>
       {`
+          [data-tippy-root] {
+            z-index: 50 !important;
+          }
           .tippy-box {
             padding-right: 20px;
             pointer-events: auto;
@@ -119,20 +169,27 @@ export const Maily = ({ value, onChange, className, ...rest }: MailyProps) => {
     [onChange]
   );
 
-  const _Editor = isEnhancedDigestEnabled ? EditorDigest : Editor;
-
   return (
-    <>
+    <div className="relative h-full flex-1 overflow-y-auto bg-neutral-50 px-16 pt-8">
       {overrideTippyBoxStyles()}
       <div
+        ref={editorParentRef}
         className={cn(
           `shadow-xs mx-auto flex min-h-full max-w-[${MAILY_EMAIL_WIDTH}px] flex-col items-start rounded-lg bg-white [&_a]:pointer-events-none`,
           className
         )}
+        data-gramm={false}
+        data-gramm_editor={false}
+        data-enable-grammarly="false"
+        aria-autocomplete="none"
+        aria-multiline={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        spellCheck={false}
         {...rest}
       >
-        <_Editor
-          key="repeat-block-enabled"
+        <Editor
+          key={`${variablesKey}-repeat-block-enabled`}
           config={DEFAULT_EDITOR_CONFIG}
           blocks={blocks}
           extensions={extensions}
@@ -142,6 +199,16 @@ export const Maily = ({ value, onChange, className, ...rest }: MailyProps) => {
           repeatMenuConfig={repeatMenuConfig}
         />
       </div>
-    </>
+      <PayloadSchemaDrawer
+        isOpen={isPayloadSchemaDrawerOpen}
+        onOpenChange={(isOpen) => {
+          if (!isOpen) {
+            closeSchemaDrawer();
+          }
+        }}
+        workflow={workflow}
+        highlightedPropertyKey={highlightedVariableKey}
+      />
+    </div>
   );
 };

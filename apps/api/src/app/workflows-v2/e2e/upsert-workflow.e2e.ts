@@ -67,11 +67,11 @@ describe('Upsert Workflow #novu-v2', function () {
 
         // delete the first step
         const updatedWorkflow = await updateWorkflow(workflow.slug, {
-          ...workflow,
-          steps: [workflow.steps[1], workflow.steps[2]],
+          ...mapResponseToUpdateDto(workflow),
+          steps: mapResponseToUpdateDto(workflow).steps.slice(1),
         });
 
-        const updatedChatStep = updatedWorkflow.steps[1];
+        const updatedChatStep = updatedWorkflow.steps[0];
         const updatedChatPayloadVariables = updatedChatStep.variables.properties?.payload;
         expect(updatedChatPayloadVariables).to.exist;
         expect((updatedChatPayloadVariables as JSONSchemaDto)?.properties).not.to.have.property('first_variable');
@@ -117,11 +117,11 @@ describe('Upsert Workflow #novu-v2', function () {
 
         // delete the first step
         const updatedWorkflow = await updateWorkflow(workflow.slug, {
-          ...workflow,
-          steps: [workflow.steps[1], workflow.steps[2]],
+          ...mapResponseToUpdateDto(workflow),
+          steps: mapResponseToUpdateDto(workflow).steps.slice(1),
         });
 
-        const updatedChatStep = updatedWorkflow.steps[1];
+        const updatedChatStep = updatedWorkflow.steps[0];
         const updatedChatPayloadVariables = updatedChatStep.variables.properties?.payload;
         expect(updatedChatPayloadVariables).to.exist;
         expect((updatedChatPayloadVariables as JSONSchemaDto)?.properties).to.have.property('first_variable');
@@ -167,8 +167,8 @@ describe('Upsert Workflow #novu-v2', function () {
 
         // delete all previous steps
         const updatedWorkflow = await updateWorkflow(workflow.slug, {
-          ...workflow,
-          steps: [workflow.steps[2]],
+          ...mapResponseToUpdateDto(workflow),
+          steps: [mapResponseToUpdateDto(workflow).steps[2]],
         });
 
         const updatedChatStep = updatedWorkflow.steps[0];
@@ -177,6 +177,69 @@ describe('Upsert Workflow #novu-v2', function () {
         expect((updatedChatPayloadVariables as JSONSchemaDto)?.properties).not.to.have.property('first_variable');
         expect((updatedChatPayloadVariables as JSONSchemaDto)?.properties).not.to.have.property('second_variable');
       });
+    });
+
+    it('when switching the editor type it should convert the body value', async () => {
+      const workflow = await createWorkflow({
+        name: 'Test Workflow',
+        workflowId: `test-workflow-${Date.now()}`,
+        source: WorkflowCreationSourceEnum.Editor,
+        active: true,
+        steps: [
+          {
+            name: `Email`,
+            type: StepTypeEnum.Email,
+            controlValues: {
+              disableOutputSanitization: false,
+              editorType: 'block',
+              body: '{"type":"doc","content":[{"type":"paragraph","attrs":{"textAlign":null,"showIfKey":null},"content":[{"type":"text","text":"test"}]}]}',
+              subject: 'subject',
+            },
+          },
+        ],
+      });
+
+      const updatedWorkflow = await updateWorkflow(workflow.slug, {
+        ...workflow,
+        steps: [
+          {
+            ...workflow.steps[0],
+            controlValues: {
+              ...workflow.steps[0].controls.values,
+              editorType: 'html',
+            },
+          },
+        ],
+      });
+
+      const updatedEmailStep = updatedWorkflow.steps[0];
+
+      expect(updatedEmailStep.controls.values.editorType).to.equal('html');
+      expect(updatedEmailStep.controls.values.body).to.contain('<!DOCTYPE');
+      expect(updatedEmailStep.controls.values.body).to.contain('<html');
+      expect(updatedEmailStep.controls.values.body).to.contain('<body');
+      expect(updatedEmailStep.controls.values.body).to.contain(`>
+              test
+            </p>`);
+      expect(updatedEmailStep.controls.values.body).to.contain('</body>');
+      expect(updatedEmailStep.controls.values.body).to.contain('</html>');
+
+      const updatedWorkflow2 = await updateWorkflow(workflow.slug, {
+        ...workflow,
+        steps: [
+          {
+            ...workflow.steps[0],
+            controlValues: {
+              ...updatedEmailStep.controls.values,
+              editorType: 'block',
+            },
+          },
+        ],
+      });
+
+      const updatedEmailStep2 = updatedWorkflow2.steps[0];
+      expect(updatedEmailStep2.controls.values.editorType).to.equal('block');
+      expect(updatedEmailStep2.controls.values.body).to.equal('');
     });
   });
 
@@ -190,5 +253,17 @@ describe('Upsert Workflow #novu-v2', function () {
     const { result: updateWorkflowBody } = await novuClient.workflows.update(workflow, workflowSlug);
 
     return updateWorkflowBody;
+  }
+
+  function mapResponseToUpdateDto(workflowResponse: WorkflowResponseDto): UpdateWorkflowDto {
+    return {
+      ...workflowResponse,
+      steps: workflowResponse.steps.map((step) => ({
+        id: step.id,
+        type: step.type,
+        name: step.name,
+        controlValues: step.controls?.values || {},
+      })),
+    };
   }
 });

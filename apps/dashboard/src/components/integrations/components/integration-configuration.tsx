@@ -4,7 +4,7 @@ import { Label } from '@/components/primitives/label';
 import { Separator } from '@/components/primitives/separator';
 import { useEnvironment } from '@/context/environment/hooks';
 import { ROUTES } from '@/utils/routes';
-import { ChannelTypeEnum, IIntegration, IProviderConfig } from '@novu/shared';
+import { ChannelTypeEnum, IIntegration, IProviderConfig, PermissionsEnum } from '@novu/shared';
 import { useEffect } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { RiInputField } from 'react-icons/ri';
@@ -15,6 +15,7 @@ import { EnvironmentDropdown } from '../../side-navigation/environment-dropdown'
 import { CredentialsSection } from './integration-credentials';
 import { GeneralSettings } from './integration-general-settings';
 import { isDemoIntegration } from './utils/helpers';
+import { Protect } from '@/utils/protect';
 
 type IntegrationFormData = {
   name: string;
@@ -24,7 +25,6 @@ type IntegrationFormData = {
   check: boolean;
   primary: boolean;
   environmentId: string;
-  removeNovuBranding?: boolean;
 };
 
 type IntegrationConfigurationProps = {
@@ -34,6 +34,7 @@ type IntegrationConfigurationProps = {
   mode: 'create' | 'update';
   isChannelSupportPrimary?: boolean;
   hasOtherProviders?: boolean;
+  isReadOnly?: boolean;
 };
 
 function generateSlug(name: string): string {
@@ -52,6 +53,7 @@ export function IntegrationConfiguration({
   mode,
   isChannelSupportPrimary,
   hasOtherProviders,
+  isReadOnly,
 }: IntegrationConfigurationProps) {
   const navigate = useNavigate();
   const { currentEnvironment, environments } = useEnvironment();
@@ -65,7 +67,6 @@ export function IntegrationConfiguration({
           primary: integration.primary ?? false,
           credentials: integration.credentials as Record<string, string>,
           environmentId: integration._environmentId,
-          removeNovuBranding: integration.removeNovuBranding,
         }
       : {
           name: provider?.displayName ?? '',
@@ -74,7 +75,6 @@ export function IntegrationConfiguration({
           primary: true,
           credentials: {},
           environmentId: currentEnvironment?._id ?? '',
-          removeNovuBranding: false,
         },
   });
 
@@ -101,7 +101,7 @@ export function IntegrationConfiguration({
           <div className={cn('w-full', mode === 'update' ? 'max-w-[160px]' : 'max-w-[260px]')}>
             <EnvironmentDropdown
               className="w-full shadow-none"
-              disabled={mode === 'update'}
+              disabled={mode === 'update' || isReadOnly}
               currentEnvironment={environments?.find((env) => env._id === environmentId)}
               data={environments}
               onChange={(value) => {
@@ -127,10 +127,9 @@ export function IntegrationConfiguration({
               <GeneralSettings
                 control={control}
                 mode={mode}
+                isReadOnly={isReadOnly}
                 hidePrimarySelector={!isChannelSupportPrimary}
                 disabledPrimary={!hasOtherProviders && integration?.primary}
-                // TODO: This is an ugly hack. The GeneralSettigns section should be redefined for in-app step.
-                isForInAppStep={provider?.channel === 'in_app'}
               />
             </AccordionContent>
           </AccordionItem>
@@ -156,19 +155,21 @@ export function IntegrationConfiguration({
           </div>
         ) : (
           <div className="p-3">
-            <Accordion type="single" collapsible defaultValue="credentials">
-              <AccordionItem value="credentials">
-                <AccordionTrigger>
-                  <div className="flex items-center gap-1 text-xs">
-                    <RiInputField className="text-feature size-5" />
-                    Integration Credentials
-                  </div>
-                </AccordionTrigger>
-                <AccordionContent>
-                  <CredentialsSection provider={provider} control={control} />
-                </AccordionContent>
-              </AccordionItem>
-            </Accordion>
+            <Protect permission={PermissionsEnum.INTEGRATION_WRITE}>
+              <Accordion type="single" collapsible defaultValue="credentials">
+                <AccordionItem value="credentials">
+                  <AccordionTrigger>
+                    <div className="flex items-center gap-1 text-xs">
+                      <RiInputField className="text-feature size-5" />
+                      Integration Credentials
+                    </div>
+                  </AccordionTrigger>
+                  <AccordionContent>
+                    <CredentialsSection provider={provider} control={control} isReadOnly={isReadOnly} />
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
+            </Protect>
 
             {/* TODO: This is a temporary solution to show the guide only for in-app channel, 
               we need to replace it with dedicated view per integration channel */}

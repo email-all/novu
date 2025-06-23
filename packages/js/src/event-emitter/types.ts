@@ -14,7 +14,7 @@ import type {
   UnsnoozeArgs,
 } from '../notifications';
 import { Preference } from '../preferences/preference';
-import { ListPreferencesArgs, UpdatePreferencesArgs } from '../preferences/types';
+import { ListPreferencesArgs, UpdatePreferenceArgs } from '../preferences/types';
 import type { InitializeSessionArgs } from '../session';
 import { Session, WebSocketEvent } from '../types';
 
@@ -49,15 +49,24 @@ type NotificationSnoozeEvents = BaseEvents<'notification.snooze', SnoozeArgs, No
 type NotificationUnsnoozeEvents = BaseEvents<'notification.unsnooze', UnsnoozeArgs, Notification>;
 type NotificationCompleteActionEvents = BaseEvents<'notification.complete_action', CompleteArgs, Notification>;
 type NotificationRevertActionEvents = BaseEvents<'notification.revert_action', RevertArgs, Notification>;
-type NotificationsReadAllEvents = BaseEvents<'notifications.read_all', { tags?: string[] }, Notification[]>;
-type NotificationsArchivedAllEvents = BaseEvents<'notifications.archive_all', { tags?: string[] }, Notification[]>;
+type NotificationsReadAllEvents = BaseEvents<
+  'notifications.read_all',
+  { tags?: string[]; data?: Record<string, unknown> },
+  Notification[]
+>;
+type NotificationsArchivedAllEvents = BaseEvents<
+  'notifications.archive_all',
+  { tags?: string[]; data?: Record<string, unknown> },
+  Notification[]
+>;
 type NotificationsReadArchivedAllEvents = BaseEvents<
   'notifications.archive_all_read',
-  { tags?: string[] },
+  { tags?: string[]; data?: Record<string, unknown> },
   Notification[]
 >;
 type PreferencesFetchEvents = BaseEvents<'preferences.list', ListPreferencesArgs, Preference[]>;
-type PreferenceUpdateEvents = BaseEvents<'preference.update', UpdatePreferencesArgs, Preference>;
+type PreferenceUpdateEvents = BaseEvents<'preference.update', UpdatePreferenceArgs, Preference>;
+type PreferencesBulkUpdateEvents = BaseEvents<'preferences.bulk_update', Array<UpdatePreferenceArgs>, Preference[]>;
 type SocketConnectEvents = BaseEvents<'socket.connect', { socketUrl: string }, undefined>;
 export type NotificationReceivedEvent = `notifications.${WebSocketEvent.RECEIVED}`;
 export type NotificationUnseenEvent = `notifications.${WebSocketEvent.UNSEEN}`;
@@ -89,6 +98,7 @@ export type Events = SessionInitializeEvents &
   PreferencesFetchEvents & {
     'preferences.list.updated': { data: Preference[] };
   } & PreferenceUpdateEvents &
+  PreferencesBulkUpdateEvents &
   SocketConnectEvents &
   SocketEvents &
   NotificationReadEvents &
@@ -116,6 +126,6 @@ export type NotificationEvents = keyof (NotificationReadEvents &
   NotificationsReadAllEvents &
   NotificationsArchivedAllEvents &
   NotificationsReadArchivedAllEvents);
-export type PreferenceEvents = keyof PreferenceUpdateEvents;
+export type PreferenceEvents = keyof (PreferenceUpdateEvents & PreferencesBulkUpdateEvents);
 
 export type EventHandler<T = unknown> = (event: T) => void;

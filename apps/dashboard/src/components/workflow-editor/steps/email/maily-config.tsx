@@ -1,4 +1,4 @@
-import { searchSlashCommands } from '@maily-to/core-digest/extensions';
+import { searchSlashCommands } from '@maily-to/core/extensions';
 import {
   BlockGroupItem,
   blockquote,
@@ -28,7 +28,7 @@ import {
   LogoAttributes as MailyLogoAttributes,
   LinkExtension,
   LinkAttributes as MailyLinkAttributes,
-} from '@maily-to/core-digest/extensions';
+} from '@maily-to/core/extensions';
 import {
   getSlashCommandSuggestions,
   getVariableSuggestions,
@@ -43,26 +43,23 @@ import { ReactNodeViewRenderer } from '@tiptap/react';
 import type { Editor as TiptapEditor } from '@tiptap/core';
 import { StepResponseDto } from '@novu/shared';
 
-import { VariablePill } from '@/components/variable/variable-pill';
 import { createFooters } from '@/components/workflow-editor/steps/email/blocks/footers';
 import { createHeaders } from '@/components/workflow-editor/steps/email/blocks/headers';
 import { createHtmlCodeBlock } from '@/components/workflow-editor/steps/email/blocks/html';
 import { useTelemetry } from '@/hooks/use-telemetry';
 import { createDigestBlock } from './blocks/digest';
-import {
-  CalculateVariablesProps,
-  insertVariableToEditor,
-  isInsideRepeatBlock,
-  resolveRepeatBlockAlias,
-  VariableFrom,
-} from './variables/variables';
+
+import { CalculateVariablesProps, insertVariableToEditor, VariableFrom } from './variables/variables';
+import { isInsideRepeatBlock, resolveRepeatBlockAlias } from './variables/repeat-block-aliases';
 import { ForView } from './views/for-view';
 import { HTMLCodeBlockView } from './views/html-view';
 import { ParsedVariables } from '@/utils/parseStepVariables';
 import { MailyVariablesListView } from './views/maily-variables-list-view';
-import { createVariableView } from './views/variable-view';
+import { createVariableNodeView } from './views/variable-view';
 import { createCards } from './blocks/cards';
-import { VariablePillOld } from '@/components/variable/variable-pill-old';
+import { BubbleMenuVariablePill } from './views/variable-view';
+import { createTranslationExtension } from './translations';
+
 export const VARIABLE_TRIGGER_CHARACTER = '{{';
 
 declare module '@tiptap/core' {
@@ -115,19 +112,16 @@ export const DEFAULT_EDITOR_CONFIG = {
 export const createEditorBlocks = (props: {
   track: ReturnType<typeof useTelemetry>;
   digestStepBeforeCurrent?: StepResponseDto;
-  isEnhancedDigestEnabled: boolean;
 }): BlockGroupItem[] => {
-  const { track, digestStepBeforeCurrent, isEnhancedDigestEnabled } = props;
+  const { track, digestStepBeforeCurrent } = props;
   const blocks: BlockGroupItem[] = [];
 
   const highlightBlocks = [createHtmlCodeBlock({ track }), createHeaders({ track }), createFooters({ track })];
 
-  if (isEnhancedDigestEnabled) {
-    highlightBlocks.unshift(createCards({ track }));
+  highlightBlocks.unshift(createCards({ track }));
 
-    if (digestStepBeforeCurrent) {
-      highlightBlocks.unshift(createDigestBlock({ track, digestStepBeforeCurrent }));
-    }
+  if (digestStepBeforeCurrent) {
+    highlightBlocks.unshift(createDigestBlock({ track, digestStepBeforeCurrent }));
   }
 
   blocks.push({
@@ -184,14 +178,21 @@ const getAvailableBlocks = (blocks: BlockGroupItem[], editor: TiptapEditor | nul
   return blocks;
 };
 
-export const createExtensions = (props: {
+export const createExtensions = ({
+  handleCalculateVariables,
+  parsedVariables,
+  blocks,
+  onCreateNewVariable,
+  isPayloadSchemaEnabled = false,
+  isTranslationEnabled = false,
+}: {
   handleCalculateVariables: (props: CalculateVariablesProps) => Variables | undefined;
   parsedVariables: ParsedVariables;
   blocks: BlockGroupItem[];
-  isEnhancedDigestEnabled: boolean;
+  onCreateNewVariable?: (variableName: string) => Promise<void>;
+  isPayloadSchemaEnabled?: boolean;
+  isTranslationEnabled?: boolean;
 }) => {
-  const { handleCalculateVariables, parsedVariables, blocks, isEnhancedDigestEnabled } = props;
-
   const extensions = [
     RepeatExtension.extend({
       addNodeView() {
@@ -200,9 +201,14 @@ export const createExtensions = (props: {
         });
       },
       addAttributes() {
+        // Find the first array property from the parsed variables that starts with 'payload.'
+        // Since the actual user payload is nested under payload.payload, we need to filter for payload arrays
+        const payloadArrays = parsedVariables.arrays.filter((array) => array.name.startsWith('payload.'));
+        const firstArrayVariable = payloadArrays.length > 0 ? payloadArrays[0].name : 'payload.items';
+
         return {
           each: {
-            default: 'payload.items',
+            default: firstArrayVariable,
           },
         };
       },
@@ -217,11 +223,14 @@ export const createExtensions = (props: {
     }),
     VariableExtension.extend({
       addNodeView() {
-        return ReactNodeViewRenderer(createVariableView(parsedVariables.variables, parsedVariables.isAllowedVariable), {
-          // the variable pill is 3px smaller than the default text size, but never smaller than 12px
-          className: 'relative inline-block text-[max(12px,calc(1em-3px))] h-5',
-          as: 'div',
-        });
+        return ReactNodeViewRenderer(
+          createVariableNodeView(parsedVariables.variables, parsedVariables.isAllowedVariable),
+          {
+            // the variable pill is 3px smaller than the default text size, but never smaller than 12px
+            className: 'relative inline-block text-[max(12px,calc(1em-3px))] h-5',
+            as: 'div',
+          }
+        );
       },
       addAttributes() {
         const attributes = this.parent?.();
@@ -238,25 +247,55 @@ export const createExtensions = (props: {
         command: ({ editor, range, props }) => {
           const query = props.id + '}}';
 
-          insertVariableToEditor({
-            query,
-            editor,
-            range,
-            isAllowedVariable: parsedVariables.isAllowedVariable,
-            isEnhancedDigestEnabled,
-          });
+          // Check if this is a new variable by seeing if it's a payload variable that doesn't exist in our schema
+          const isPayloadVariable = props.id.startsWith('payload.') || props.id.startsWith('current.payload.');
+          const existsInSchema = parsedVariables.variables.some((v) => v.name === props.id);
+          const isNewVariable =
+            isPayloadSchemaEnabled &&
+            isPayloadVariable &&
+            !existsInSchema &&
+            props.id !== 'payload' &&
+            props.id !== 'current.payload';
+
+          if (isNewVariable) {
+            const variableName = props.id.replace('current.payload.', '').replace('payload.', '');
+            onCreateNewVariable?.(variableName);
+
+            insertVariableToEditor({
+              query,
+              editor,
+              range,
+            });
+          } else {
+            // Calculate aliasFor before validation to properly handle "current." variables
+            const aliasFor = resolveRepeatBlockAlias(props.id, editor);
+            const isAllowed = parsedVariables.isAllowedVariable({
+              name: props.id,
+              aliasFor,
+            });
+
+            if (!isAllowed) {
+              return;
+            }
+
+            insertVariableToEditor({
+              query,
+              editor,
+              range,
+            });
+          }
         },
       },
-      // variable pills in bubble menus (repeat, showIf...)
+      // variable pills inside buttons and bubble menus (repeat, showIf...)
       renderVariable: (opts) => {
-        return isEnhancedDigestEnabled ? (
-          <VariablePill variableName={opts.variable.name} className="h-5 text-xs" from={opts.from as VariableFrom} />
-        ) : (
-          <VariablePillOld
+        return (
+          <BubbleMenuVariablePill
             variableName={opts.variable.name}
             className="h-5 text-xs"
+            editor={opts.editor}
             from={opts.from as VariableFrom}
-            hasFilters={false}
+            variables={parsedVariables.variables}
+            isAllowedVariable={parsedVariables.isAllowedVariable}
           />
         );
       },
@@ -270,179 +309,144 @@ export const createExtensions = (props: {
         });
       },
     }),
+    createTranslationExtension(isTranslationEnabled),
   ];
 
-  if (isEnhancedDigestEnabled) {
-    extensions.push(
-      ButtonExtension.extend({
-        addAttributes() {
-          const attributes = this.parent?.();
+  extensions.push(
+    ButtonExtension.extend({
+      addAttributes() {
+        const attributes = this.parent?.();
 
-          if (!isEnhancedDigestEnabled) {
-            return {
-              ...attributes,
-            };
-          }
+        return {
+          ...attributes,
+          aliasFor: {
+            default: null,
+          },
+        };
+      },
 
-          return {
-            ...attributes,
-            aliasFor: {
-              default: null,
-            },
-          };
-        },
+      addCommands() {
+        const commands = this.parent?.();
+        const editor = this.editor;
 
-        addCommands() {
-          const commands = this.parent?.();
-          const editor = this.editor;
+        if (!commands) return {};
 
-          if (!commands) return {};
+        return {
+          ...commands,
+          updateButtonAttributes: (attrs: MailyButtonAttributes) => {
+            const { text, url, isTextVariable, isUrlVariable } = attrs;
 
-          return {
-            ...commands,
-            updateButtonAttributes: (attrs: MailyButtonAttributes) => {
-              const { text, url, isTextVariable, isUrlVariable } = attrs;
+            if (isTextVariable || isUrlVariable) {
+              const aliasFor = resolveRepeatBlockAlias(isTextVariable ? (text ?? '') : (url ?? ''), editor);
+              return commands.updateButtonAttributes?.({ ...attrs, aliasFor: aliasFor ?? null });
+            }
 
-              if (isEnhancedDigestEnabled && (isTextVariable || isUrlVariable)) {
-                const aliasFor = resolveRepeatBlockAlias(
-                  isTextVariable ? (text ?? '') : (url ?? ''),
-                  editor,
-                  isEnhancedDigestEnabled
-                );
-                // @ts-expect-error - the core and core-digest collides
-                return commands.updateButtonAttributes?.({ ...attrs, aliasFor: aliasFor ?? null });
-              }
+            return commands.updateButtonAttributes?.(attrs);
+          },
+        };
+      },
+    }),
+    ImageExtension.extend({
+      addAttributes() {
+        const attributes = this.parent?.();
 
-              // @ts-expect-error - the core and core-digest collides
-              return commands.updateButtonAttributes?.(attrs);
-            },
-          };
-        },
-      }),
-      ImageExtension.extend({
-        addAttributes() {
-          const attributes = this.parent?.();
+        return {
+          ...attributes,
+          aliasFor: {
+            default: null,
+          },
+        };
+      },
 
-          if (!isEnhancedDigestEnabled) {
-            return {
-              ...attributes,
-            };
-          }
+      addCommands() {
+        const commands = this.parent?.();
+        const editor = this.editor;
 
-          return {
-            ...attributes,
-            aliasFor: {
-              default: null,
-            },
-          };
-        },
+        if (!commands) return {};
 
-        addCommands() {
-          const commands = this.parent?.();
-          const editor = this.editor;
+        return {
+          ...commands,
+          updateImageAttributes: (attrs) => {
+            const { src, isSrcVariable, externalLink, isExternalLinkVariable } = attrs;
 
-          if (!commands) return {};
+            if (isSrcVariable || isExternalLinkVariable) {
+              const aliasFor = resolveRepeatBlockAlias(isSrcVariable ? (src ?? '') : (externalLink ?? ''), editor);
+              return commands.updateImageAttributes?.({ ...attrs, aliasFor: aliasFor ?? null });
+            }
 
-          return {
-            ...commands,
-            updateImageAttributes: (attrs) => {
-              const { src, isSrcVariable, externalLink, isExternalLinkVariable } = attrs;
+            return commands.updateImageAttributes?.(attrs);
+          },
+        };
+      },
+    }),
+    InlineImageExtension.extend({
+      addAttributes() {
+        const attributes = this.parent?.();
 
-              if (isEnhancedDigestEnabled && (isSrcVariable || isExternalLinkVariable)) {
-                const aliasFor = resolveRepeatBlockAlias(
-                  isSrcVariable ? (src ?? '') : (externalLink ?? ''),
-                  editor,
-                  isEnhancedDigestEnabled
-                );
-                return commands.updateImageAttributes?.({ ...attrs, aliasFor: aliasFor ?? null });
-              }
+        return {
+          ...attributes,
+          aliasFor: {
+            default: null,
+          },
+        };
+      },
 
-              return commands.updateImageAttributes?.(attrs);
-            },
-          };
-        },
-      }),
-      InlineImageExtension.extend({
-        addAttributes() {
-          const attributes = this.parent?.();
+      addCommands() {
+        const commands = this.parent?.();
+        const editor = this.editor;
 
-          if (!isEnhancedDigestEnabled) {
-            return {
-              ...attributes,
-            };
-          }
+        if (!commands) return {};
 
-          return {
-            ...attributes,
-            aliasFor: {
-              default: null,
-            },
-          };
-        },
+        return {
+          ...commands,
+          updateInlineImageAttributes: (attrs) => {
+            const { src, isSrcVariable, externalLink, isExternalLinkVariable } = attrs;
 
-        addCommands() {
-          const commands = this.parent?.();
-          const editor = this.editor;
+            if (isSrcVariable || isExternalLinkVariable) {
+              const aliasFor = resolveRepeatBlockAlias(isSrcVariable ? (src ?? '') : (externalLink ?? ''), editor);
+              return commands.updateInlineImageAttributes?.({ ...attrs, aliasFor: aliasFor ?? null });
+            }
 
-          if (!commands) return {};
+            return commands.updateInlineImageAttributes?.(attrs);
+          },
+        };
+      },
+    }),
+    LinkExtension.extend({
+      addAttributes() {
+        const attributes = this.parent?.();
 
-          return {
-            ...commands,
-            updateInlineImageAttributes: (attrs) => {
-              const { src, isSrcVariable, externalLink, isExternalLinkVariable } = attrs;
+        return {
+          ...attributes,
+          aliasFor: {
+            default: null,
+          },
+        };
+      },
 
-              if (isEnhancedDigestEnabled && (isSrcVariable || isExternalLinkVariable)) {
-                const aliasFor = resolveRepeatBlockAlias(
-                  isSrcVariable ? (src ?? '') : (externalLink ?? ''),
-                  editor,
-                  isEnhancedDigestEnabled
-                );
-                return commands.updateInlineImageAttributes?.({ ...attrs, aliasFor: aliasFor ?? null });
-              }
+      addCommands() {
+        const commands = this.parent?.();
+        const editor = this.editor;
 
-              return commands.updateInlineImageAttributes?.(attrs);
-            },
-          };
-        },
-      }),
-      // @ts-expect-error - the core and core-digest collides
-      LinkExtension.extend({
-        addAttributes() {
-          const attributes = this.parent?.();
+        if (!commands) return {};
 
-          return {
-            ...attributes,
-            aliasFor: {
-              default: null,
-            },
-          };
-        },
+        return {
+          ...commands,
+          updateLinkAttributes: (attrs: MailyLinkAttributes) => {
+            const { href, isUrlVariable } = attrs;
 
-        addCommands() {
-          const commands = this.parent?.();
-          const editor = this.editor;
+            if (isUrlVariable) {
+              const aliasFor = resolveRepeatBlockAlias(href ?? '', editor);
+              return commands.updateLinkAttributes?.({ ...attrs, aliasFor: aliasFor ?? null });
+            }
 
-          if (!commands) return {};
-
-          return {
-            ...commands,
-            updateLinkAttributes: (attrs: MailyLinkAttributes) => {
-              const { href, isUrlVariable } = attrs;
-
-              if (isEnhancedDigestEnabled && isUrlVariable) {
-                const aliasFor = resolveRepeatBlockAlias(href ?? '', editor, isEnhancedDigestEnabled);
-                // @ts-expect-error - the core and core-digest collides
-                return commands.updateLinkAttributes?.({ ...attrs, aliasFor: aliasFor ?? null });
-              }
-
-              // @ts-expect-error - the core and core-digest collides
-              return commands.updateLinkAttributes?.(attrs);
-            },
-          };
-        },
-      })
-    );
-  }
+            // @ts-expect-error - the core and core-digest collides
+            return commands.updateLinkAttributes?.(attrs);
+          },
+        };
+      },
+    })
+  );
 
   return extensions;
 };

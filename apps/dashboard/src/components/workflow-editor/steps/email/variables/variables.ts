@@ -3,11 +3,12 @@ import { Variable } from '@maily-to/core/extensions';
 
 import { IsAllowedVariable, LiquidVariable } from '@/utils/parseStepVariables';
 import type { Editor, Range, Editor as TiptapEditor } from '@tiptap/core';
-import { parseVariable } from '@/utils/liquid';
-
-export const REPEAT_BLOCK_ITERABLE_ALIAS = 'current';
-
-export const ALLOWED_ALIASES = [REPEAT_BLOCK_ITERABLE_ALIAS];
+import {
+  REPEAT_BLOCK_ITERABLE_ALIAS,
+  resolveRepeatBlockAlias,
+  isInsideRepeatBlock,
+  updateRepeatBlockChildAliases,
+} from './repeat-block-aliases';
 
 export enum VariableFrom {
   // variable coming from bubble menu (e.g. 'showIf')
@@ -16,6 +17,8 @@ export enum VariableFrom {
   RepeatEachKey = 'repeat-variable',
   // all the other variables
   Content = 'content-variable',
+  // variables inside Button component
+  Button = 'button-variable',
 }
 
 export type CalculateVariablesProps = {
@@ -26,8 +29,8 @@ export type CalculateVariablesProps = {
   arrays: Array<LiquidVariable>;
   namespaces: Array<LiquidVariable>;
   isAllowedVariable: IsAllowedVariable;
-  isEnhancedDigestEnabled: boolean;
   addDigestVariables?: boolean;
+  isPayloadSchemaEnabled?: boolean;
 };
 
 const insertNodeToEditor = ({
@@ -68,14 +71,10 @@ const insertNodeToEditor = ({
 export const insertVariableToEditor = ({
   query,
   editor,
-  isAllowedVariable,
-  isEnhancedDigestEnabled,
   range,
 }: {
   query: string;
   editor: TiptapEditor;
-  isAllowedVariable: IsAllowedVariable;
-  isEnhancedDigestEnabled: boolean;
   range?: { from: number; to: number };
 }) => {
   // if we type then we need to close, if we accept suggestion then it has range
@@ -83,13 +82,8 @@ export const insertVariableToEditor = ({
   if (!isClosedVariable) return;
 
   const queryWithoutSuffix = query.replace(/}+$/, '');
-  const queryWithPrefixAndSuffix = '{{' + queryWithoutSuffix + '}}';
-  const parsedVariable = parseVariable(queryWithPrefixAndSuffix);
 
-  const aliasFor = resolveRepeatBlockAlias(queryWithoutSuffix, editor, isEnhancedDigestEnabled);
-  const variable: LiquidVariable = { name: parsedVariable?.name ?? '', aliasFor };
-
-  if (!isAllowedVariable(variable)) return;
+  const aliasFor = resolveRepeatBlockAlias(queryWithoutSuffix, editor);
 
   // Calculate range for manual typing if not provided by suggestion
   const calculatedRange = range || {
@@ -115,7 +109,6 @@ export const insertVariableToEditor = ({
 const getVariablesByContext = ({
   editor,
   from,
-  isEnhancedDigestEnabled,
   primitives,
   arrays,
   namespaces,
@@ -123,7 +116,6 @@ const getVariablesByContext = ({
 }: {
   editor: TiptapEditor;
   from: VariableFrom;
-  isEnhancedDigestEnabled: boolean;
   primitives: Array<LiquidVariable>;
   arrays: Array<LiquidVariable>;
   namespaces: Array<LiquidVariable>;
@@ -135,7 +127,7 @@ const getVariablesByContext = ({
   const getVariables = () => {
     const baseVariables = [...primitives, ...namespaces, ...iterables];
 
-    if (!isInRepeatBlock && isEnhancedDigestEnabled && addDigestVariables) {
+    if (!isInRepeatBlock && addDigestVariables) {
       const mappedDigestVariables = DIGEST_VARIABLES.map((variable) => ({
         name: variable.name,
       }));
@@ -143,7 +135,7 @@ const getVariablesByContext = ({
     }
 
     // If we're not in a repeat block, return all variables
-    if (!isInRepeatBlock || !isEnhancedDigestEnabled) {
+    if (!isInRepeatBlock) {
       return baseVariables;
     }
 
@@ -160,8 +152,15 @@ const getVariablesByContext = ({
           return [];
         }
 
-        // Otherwise, get the last part after the iterableName
+        // Handle array payload variables (e.g., "steps.digest-step.events[0].payload.xxx")
+        if (variable.name?.startsWith(iterableName + '[0].payload.')) {
+          const suffix = variable.name.replace(iterableName + '[0].', '');
+          return [{ name: `${REPEAT_BLOCK_ITERABLE_ALIAS}.${suffix}` }];
+        }
+
+        // Handle other nested properties - get the last part after the iterableName
         const suffix = variable.name.split('.').pop();
+
         return suffix ? [{ name: `${REPEAT_BLOCK_ITERABLE_ALIAS}.${suffix}` }] : [];
       });
 
@@ -173,7 +172,7 @@ const getVariablesByContext = ({
     // Case 1: Inside repeat block's "each" key input - only allow iterables
     case VariableFrom.RepeatEachKey:
       if (isInRepeatBlock) {
-        updateRepeatBlockChildAliases(editor, isEnhancedDigestEnabled);
+        updateRepeatBlockChildAliases(editor);
         return iterables;
       }
 
@@ -201,8 +200,8 @@ export const calculateVariables = ({
   arrays,
   namespaces,
   isAllowedVariable,
-  isEnhancedDigestEnabled,
   addDigestVariables = false,
+  isPayloadSchemaEnabled = false,
 }: CalculateVariablesProps): Array<LiquidVariable> | undefined => {
   const queryWithoutSuffix = query.replace(/}+$/, '');
 
@@ -210,22 +209,53 @@ export const calculateVariables = ({
   const variables = getVariablesByContext({
     editor,
     from,
-    isEnhancedDigestEnabled,
     primitives,
     arrays,
     namespaces,
     addDigestVariables,
   });
 
+  // Add new variable creation support for payload variables when schema is enabled
+  const PAYLOAD_NAMESPACE = 'payload';
+
+  if (
+    isPayloadSchemaEnabled &&
+    queryWithoutSuffix.trim() &&
+    (queryWithoutSuffix.startsWith(PAYLOAD_NAMESPACE + '.') ||
+      queryWithoutSuffix.startsWith('current.' + PAYLOAD_NAMESPACE + '.')) &&
+    queryWithoutSuffix !== PAYLOAD_NAMESPACE
+  ) {
+    const variableKey = queryWithoutSuffix
+      .replace('current.' + PAYLOAD_NAMESPACE + '.', '')
+      .replace(PAYLOAD_NAMESPACE + '.', '');
+
+    // Check if this variable doesn't already exist
+    const existingVariable = variables.find((v) => v.name === queryWithoutSuffix);
+
+    if (!existingVariable && variableKey.trim()) {
+      variables.unshift({
+        name: queryWithoutSuffix,
+        type: 'new-variable',
+        isNewSuggestion: true,
+        displayLabel: `Create ${queryWithoutSuffix}`,
+        boost: 100, // Boost to show at top
+      });
+    }
+  }
+
   // Add currently typed variable if allowed
   if (
     queryWithoutSuffix.trim() &&
     isAllowedVariable({
       name: queryWithoutSuffix,
-      aliasFor: resolveRepeatBlockAlias(queryWithoutSuffix, editor, isEnhancedDigestEnabled),
+      aliasFor: resolveRepeatBlockAlias(queryWithoutSuffix, editor),
     })
   ) {
-    variables.push({ name: queryWithoutSuffix });
+    const existingVariable = variables.find((v) => v.name === queryWithoutSuffix);
+
+    if (!existingVariable) {
+      variables.push({ name: queryWithoutSuffix });
+    }
   }
 
   /* Skip variable insertion by closing "}}" for bubble menus since they require special handling:
@@ -234,89 +264,11 @@ export const calculateVariables = ({
    * 3. For now bubble variables can be only added via Enter key which triggers a separate insertion flow
    *    (which is external somewhere in TipTap or Maily)
    */
-  if (from === VariableFrom.Content) {
-    insertVariableToEditor({ query, editor, isAllowedVariable, isEnhancedDigestEnabled });
+  if (from === VariableFrom.Content && isAllowedVariable({ name: queryWithoutSuffix })) {
+    insertVariableToEditor({ query, editor });
   }
 
   return dedupAndSortVariables(variables, queryWithoutSuffix);
-};
-
-export function isAllowedAlias(variableName: string): boolean {
-  const [variablePart] = variableName.split('|');
-  const nameRoot = variablePart.split('.')[0];
-
-  return ALLOWED_ALIASES.includes(nameRoot);
-}
-
-export const resolveRepeatBlockAlias = (
-  variable: string,
-  editor: Editor,
-  isEnhancedDigestEnabled: boolean
-): string | null => {
-  if (!isEnhancedDigestEnabled) return null;
-
-  // Extract the root of the variable name (before any dots)
-  const parsedVariable = parseVariable(variable);
-  if (!parsedVariable) return null;
-
-  const { nameRoot, name, filters } = parsedVariable;
-
-  if (isAllowedAlias(nameRoot) && isInsideRepeatBlock(editor)) {
-    // Replace only the variable name part, keeping the filters separate
-    const replacedVariable = name.replace(nameRoot, editor.getAttributes('repeat')?.each);
-
-    // Return the replaced variable with filters appended
-    return replacedVariable + filters;
-  }
-
-  return null;
-};
-
-const findRepeatBlock = (editor: Editor) => {
-  const { $from } = editor.state.selection;
-
-  for (let depth = $from.depth; depth > 0; depth--) {
-    if ($from.node(depth).type.name === 'repeat') {
-      return { block: $from.node(depth), depth };
-    }
-  }
-
-  return null;
-};
-
-/**
- * Updates the 'aliasFor' attribute for all child nodes of the selected repeat block,
- * when the repeat block iterable changes.
- *
- * @example
- * iterable: 'payload.comments' => 'payload.blogs'
- * variable aliasFor: 'payload.comments.author' => 'payload.blogs.author'
- */
-const updateRepeatBlockChildAliases = (editor: Editor, isEnhancedDigestEnabled: boolean) => {
-  if (!isEnhancedDigestEnabled) return;
-  const repeat = findRepeatBlock(editor);
-
-  if (!repeat) return;
-
-  editor
-    .chain()
-    .command(({ tr }) => {
-      const { block, depth } = repeat;
-      const repeatPos = editor.state.selection.$from.before(depth);
-
-      block.content.descendants((node, pos) => {
-        if (node.type.name === 'variable' && node.attrs.aliasFor) {
-          const newAlias = resolveRepeatBlockAlias(node.attrs.id, editor, isEnhancedDigestEnabled);
-          tr.setNodeMarkup(repeatPos + pos + 1, null, { ...node.attrs, aliasFor: newAlias });
-        }
-      });
-      return true;
-    })
-    .run();
-};
-
-export const isInsideRepeatBlock = (editor: TiptapEditor): boolean => {
-  return editor?.isActive('repeat') ?? false;
 };
 
 const getRepeatBlockEachVariables = (editor: TiptapEditor): Array<LiquidVariable> => {

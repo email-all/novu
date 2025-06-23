@@ -1,21 +1,22 @@
 import _ from 'lodash';
 import { Injectable } from '@nestjs/common';
-import { ControlValuesRepository, EnvironmentEntity, OrganizationEntity, UserEntity } from '@novu/dal';
+import { ControlValuesRepository } from '@novu/dal';
 import { ControlValuesLevelEnum, FeatureFlagsKeysEnum } from '@novu/shared';
-import { FeatureFlagsService, Instrument, InstrumentUsecase } from '@novu/application-generic';
+import { FeatureFlagsService, Instrument, InstrumentUsecase, GetWorkflowByIdsUseCase } from '@novu/application-generic';
 
 import { collectKeys, keysToObject } from '../../util/utils';
 import { buildVariables } from '../../util/build-variables';
 import { CreateVariablesObjectCommand } from './create-variables-object.command';
 import { MailyAttrsEnum } from '../../../shared/helpers/maily.types';
 import { isStringifiedMailyJSONContent } from '../../../shared/helpers/maily-utils';
+import { JsonSchemaMock } from '../../util/json-schema-mock';
 
 export type ArrayVariable = {
   path: string;
   iterations: number;
 };
 
-export const DEFAULT_ARRAY_ELEMENTS = 5;
+export const DEFAULT_ARRAY_ELEMENTS = 3;
 /**
  * Extracts all the variables used in the step control values.
  * Then it creates the object representation of those variables.
@@ -29,31 +30,46 @@ export class CreateVariablesObject {
 
   @InstrumentUsecase()
   async execute(command: CreateVariablesObjectCommand): Promise<Record<string, unknown>> {
-    const { userId, environmentId, organizationId } = command;
-    const isEnhancedDigestEnabled = await this.featureFlagService.getFlag({
-      user: { _id: userId } as UserEntity,
-      environment: { _id: environmentId } as EnvironmentEntity,
-      organization: { _id: organizationId } as OrganizationEntity,
-      key: FeatureFlagsKeysEnum.IS_ENHANCED_DIGEST_ENABLED,
+    const isHtmlEditorEnabled = await this.featureFlagService.getFlag({
+      key: FeatureFlagsKeysEnum.IS_HTML_EDITOR_ENABLED,
+      organization: { _id: command.organizationId },
+      environment: { _id: command.environmentId },
+      user: { _id: command.userId },
       defaultValue: false,
     });
+
     const controlValues = await this.getControlValues(command);
 
-    const variables = this.extractAllVariables(controlValues);
+    const variables = this.extractAllVariables(controlValues, isHtmlEditorEnabled);
     const arrayVariables = this.extractArrayVariables(controlValues);
     const showIfVariables = this.extractMailyAttribute(controlValues, MailyAttrsEnum.SHOW_IF_KEY);
 
     const variablesObject = keysToObject(variables, arrayVariables, showIfVariables);
 
-    if (isEnhancedDigestEnabled) {
-      return this.ensureEventsVariableIsAnArray(variablesObject);
-    }
-
-    return variablesObject;
+    return await this.ensureEventsVariableIsAnArray(variablesObject, command);
   }
 
-  private ensureEventsVariableIsAnArray(variablesObject: Record<string, unknown>) {
+  private async ensureEventsVariableIsAnArray(
+    variablesObject: Record<string, unknown>,
+    command: CreateVariablesObjectCommand
+  ) {
     const stepsObject = (variablesObject.steps as Record<string, unknown>) ?? {};
+
+    // Check if we have steps with events and a payload schema to work with
+    const hasStepsWithEvents = Object.keys(stepsObject).length > 0;
+    const hasPayloadSchema = !!command.payloadSchema;
+
+    let isPayloadSchemaEnabled = false;
+
+    // Only check feature flag if we have both steps and payload schema
+    if (hasStepsWithEvents && hasPayloadSchema) {
+      isPayloadSchemaEnabled = await this.featureFlagService.getFlag({
+        key: FeatureFlagsKeysEnum.IS_PAYLOAD_SCHEMA_ENABLED,
+        defaultValue: false,
+        organization: { _id: command.organizationId },
+        environment: { _id: command.environmentId },
+      });
+    }
 
     Object.keys(stepsObject).forEach((stepId) => {
       const step = stepsObject[stepId] as Record<string, unknown>;
@@ -79,26 +95,66 @@ export class CreateVariablesObject {
 
       if (hasUsedEventCount || hasUsedEventsLength || hasUsedEvents || hasUsedEventsWithPayload) {
         let payload = {};
-        if (Array.isArray(step.events)) {
-          const hasPayloadInEvents = step.events.every((evt) => {
-            return typeof evt === 'object' && 'payload' in evt;
-          });
-          if (hasPayloadInEvents) {
-            payload = step.events[0].payload;
-          }
-        } else if (hasUsedEventsWithPayload) {
-          const variableNameAfterPayload = collectKeys((step.events as Record<string, unknown>).payload);
-          for (const variableName of variableNameAfterPayload) {
-            const key = variableName.split('.').pop() ?? variableName;
 
-            payload = { ...payload, ...this.setNestedValue(payload, variableName, key) };
+        // Use JsonSchemaMock if payload schema is available and feature flag is enabled
+        if (isPayloadSchemaEnabled && command.payloadSchema) {
+          try {
+            const schema = {
+              type: 'object' as const,
+              properties: { payload: command.payloadSchema },
+              additionalProperties: false,
+            };
+            const mockData = JsonSchemaMock.generate(schema) as Record<string, unknown>;
+            payload = mockData.payload as Record<string, unknown>;
+          } catch (error) {
+            payload = this.generateFallbackPayload(step, hasUsedEventsWithPayload);
           }
+        } else {
+          // Original fallback method when no payload schema or feature flag is disabled
+          payload = this.generateFallbackPayload(step, hasUsedEventsWithPayload);
         }
-        step.events = Array.from({ length: DEFAULT_ARRAY_ELEMENTS }, () => ({ payload }));
+
+        step.events = Array.from({ length: DEFAULT_ARRAY_ELEMENTS }, (unused, index) => {
+          const eventDate = new Date();
+          eventDate.setDate(eventDate.getDate() - 1);
+          eventDate.setHours(12, 0, 0, 0);
+          eventDate.setMinutes(eventDate.getMinutes() + index); // Slightly different times for each event
+
+          return {
+            id: `example-id-${index + 1}`,
+            time: eventDate.toISOString(),
+            payload,
+          };
+        });
       }
     });
 
     return variablesObject;
+  }
+
+  private generateFallbackPayload(
+    step: Record<string, unknown>,
+    hasUsedEventsWithPayload: boolean
+  ): Record<string, unknown> {
+    let payload = {};
+
+    if (Array.isArray(step.events)) {
+      const hasPayloadInEvents = step.events.every((evt) => {
+        return typeof evt === 'object' && 'payload' in evt;
+      });
+      if (hasPayloadInEvents) {
+        payload = step.events[0].payload;
+      }
+    } else if (hasUsedEventsWithPayload) {
+      const variableNameAfterPayload = collectKeys((step.events as Record<string, unknown>).payload);
+      for (const variableName of variableNameAfterPayload) {
+        const key = variableName.split('.').pop() ?? variableName;
+
+        payload = { ...payload, ...this.setNestedValue(payload, variableName, key) };
+      }
+    }
+
+    return payload;
   }
 
   private setNestedValue(obj: Record<string, unknown>, path: string, value: string) {
@@ -153,9 +209,13 @@ export class CreateVariablesObject {
    * returns = [ "name", "address" ]
    */
   @Instrument()
-  private extractAllVariables(controlValues: unknown[]): string[] {
+  private extractAllVariables(controlValues: unknown[], isHtmlEditorEnabled: boolean): string[] {
     const variables = controlValues.flatMap((value) => {
-      const templateVariables = buildVariables(undefined, value);
+      const templateVariables = buildVariables({
+        useNewLiquidParser: isHtmlEditorEnabled,
+        variableSchema: undefined,
+        controlValue: value,
+      });
 
       return templateVariables.validVariables.map((variable) => variable.name);
     });

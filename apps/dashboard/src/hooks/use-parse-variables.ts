@@ -1,22 +1,25 @@
-import { parseStepVariables } from '@/utils/parseStepVariables';
-import { FeatureFlagsKeysEnum, type JSONSchemaDefinition } from '@novu/shared';
+import { parseStepVariables, type EnhancedParsedVariables } from '@/utils/parseStepVariables';
+import { type JSONSchemaDefinition } from '@novu/shared';
+import { JSONSchema7 } from 'json-schema';
 import { useMemo } from 'react';
-import { useFeatureFlag } from './use-feature-flag';
 
-export function useParseVariables(schema?: JSONSchemaDefinition, digestStepId?: string) {
-  const isEnhancedDigestEnabled = useFeatureFlag(FeatureFlagsKeysEnum.IS_ENHANCED_DIGEST_ENABLED);
-
+export function useParseVariables(
+  schema?: JSONSchemaDefinition | JSONSchema7,
+  digestStepId?: string,
+  isPayloadSchemaEnabled?: boolean
+): EnhancedParsedVariables {
   const parsedVariables = useMemo(() => {
     return schema
-      ? parseStepVariables(schema, { isEnhancedDigestEnabled, digestStepId })
+      ? parseStepVariables(schema, { digestStepId, isPayloadSchemaEnabled })
       : {
           variables: [],
           namespaces: [],
           primitives: [],
           arrays: [],
+          enhancedVariables: [],
           isAllowedVariable: () => false,
         };
-  }, [schema, isEnhancedDigestEnabled, digestStepId]);
+  }, [schema, digestStepId, isPayloadSchemaEnabled]);
 
   return parsedVariables;
 }

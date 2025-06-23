@@ -4,9 +4,11 @@ import { useDeleteSubscriber } from '@/hooks/use-delete-subscriber';
 import { usePatchSubscriber } from '@/hooks/use-patch-subscriber';
 import { useTelemetry } from '@/hooks/use-telemetry';
 import { formatDateSimple } from '@/utils/format-date';
+import { QueryKeys } from '@/utils/query-keys';
 import { TelemetryEvent } from '@/utils/telemetry';
 import { cn } from '@/utils/ui';
 import { zodResolver } from '@hookform/resolvers/zod';
+import { useQueryClient } from '@tanstack/react-query';
 import { SubscriberResponseDto } from '@novu/api/models/components';
 import { loadLanguage } from '@uiw/codemirror-extensions-langs';
 import { useEffect, useState } from 'react';
@@ -44,6 +46,8 @@ const toastOptions: ExternalToast = {
 type SubscriberOverviewFormProps = {
   subscriber: SubscriberResponseDto;
   readOnly?: boolean;
+  onCloseDrawer?: () => void;
+  closeOnSave?: boolean;
 };
 
 const createDefaultSubscriberValues = (subscriber: SubscriberResponseDto) => ({
@@ -58,12 +62,13 @@ const createDefaultSubscriberValues = (subscriber: SubscriberResponseDto) => ({
 });
 
 export function SubscriberOverviewForm(props: SubscriberOverviewFormProps) {
-  const { subscriber, readOnly = false } = props;
+  const { subscriber, readOnly = false, onCloseDrawer, closeOnSave = false } = props;
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const track = useTelemetry();
+  const queryClient = useQueryClient();
 
   const { navigateToSubscribersFirstPage, navigateToSubscribersCurrentPage } = useSubscribersNavigate();
-  const { filterValues } = useSubscribersUrlState();
+  const { filterValues, handleNavigationAfterDelete } = useSubscribersUrlState();
   const { data } = useFetchSubscribers(filterValues, {
     meta: { errorMessage: 'Issue fetching subscribers' },
   });
@@ -74,10 +79,37 @@ export function SubscriberOverviewForm(props: SubscriberOverviewFormProps) {
       track(TelemetryEvent.SUBSCRIBER_DELETED);
       const isLastSubscriber = data?.data.length === 1;
 
+      if (onCloseDrawer) {
+        onCloseDrawer();
+      }
+
       if (isLastSubscriber) {
+        queryClient.invalidateQueries({
+          queryKey: [QueryKeys.fetchSubscribers],
+        });
         navigateToSubscribersFirstPage();
       } else {
-        navigateToSubscribersCurrentPage();
+        const firstTwoSubscribersInternalIds = data?.data.slice(0, 2).map((s) => s._id as string) || [];
+        const subscribersCount = data?.data.length || 0;
+
+        const hasTwoSubscribersInternalIds = firstTwoSubscribersInternalIds.length === 2 && subscribersCount > 1;
+        const firstSubscriberInternalId = firstTwoSubscribersInternalIds[0] || '';
+        const isFirstSubscriberBeingDeleted = (subscriber as any)._id === firstSubscriberInternalId;
+        let afterCursor = firstSubscriberInternalId;
+
+        /**
+         * If the first subscriber is being deleted and there are more than one subscribers on the list then
+         * fetch the list from the second subscriber onwards.
+         */
+        if (isFirstSubscriberBeingDeleted && hasTwoSubscribersInternalIds) {
+          afterCursor = firstTwoSubscribersInternalIds[1];
+        }
+
+        if (afterCursor) {
+          handleNavigationAfterDelete(afterCursor);
+        } else {
+          navigateToSubscribersCurrentPage();
+        }
       }
     },
     onError: () => {
@@ -96,6 +128,10 @@ export function SubscriberOverviewForm(props: SubscriberOverviewFormProps) {
       showSuccessToast(`Updated subscriber: ${getSubscriberTitle(data)}`, undefined, toastOptions);
       form.reset(createDefaultSubscriberValues(data));
       track(TelemetryEvent.SUBSCRIBER_EDITED);
+
+      if (closeOnSave && onCloseDrawer) {
+        onCloseDrawer();
+      }
     },
     onError: () => {
       showErrorToast('Failed to update subscriber', undefined, toastOptions);

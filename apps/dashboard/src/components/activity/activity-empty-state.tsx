@@ -9,6 +9,8 @@ import { useMemo } from 'react';
 import { RiCloseCircleLine, RiPlayCircleLine } from 'react-icons/ri';
 import { useNavigate } from 'react-router-dom';
 import { ExternalLink } from '../shared/external-link';
+import { PermissionsEnum } from '@novu/shared';
+import { Protect } from '@/utils/protect';
 
 interface ActivityEmptyStateProps {
   className?: string;
@@ -18,6 +20,7 @@ interface ActivityEmptyStateProps {
   emptySearchDescription?: string;
   emptyFiltersDescription?: string;
   onClearFilters?: () => void;
+  onTriggerWorkflow?: () => void;
 }
 
 export function ActivityEmptyState({
@@ -25,6 +28,7 @@ export function ActivityEmptyState({
   filters = defaultActivityFilters,
   emptySearchResults,
   onClearFilters,
+  onTriggerWorkflow,
   emptySearchTitle = 'No activity matches that filter',
   emptySearchDescription = 'Try adjusting your filters to see more results.',
   emptyFiltersDescription = 'Your activity feed is empty. Once you trigger your first workflow, you can monitor notifications and view delivery details.',
@@ -35,6 +39,8 @@ export function ActivityEmptyState({
   const handleNavigateToWorkflows = () => {
     navigate(buildRoute(ROUTES.WORKFLOWS, { environmentSlug: currentEnvironment?.slug ?? '' }));
   };
+
+  const handleTriggerWorkflow = onTriggerWorkflow || handleNavigateToWorkflows;
 
   const emptyFiltersTitle = useMemo(() => {
     return `No activity in the past ${filters?.dateRange}`;
@@ -123,14 +129,16 @@ export function ActivityEmptyState({
               <ExternalLink underline={false} variant="documentation" href="https://docs.novu.co" target="_blank">
                 View Docs
               </ExternalLink>
-              <Button
-                leadingIcon={RiPlayCircleLine}
-                variant="primary"
-                className="gap-2"
-                onClick={handleNavigateToWorkflows}
-              >
-                Trigger Workflow
-              </Button>
+              <Protect permission={PermissionsEnum.EVENT_WRITE}>
+                <Button
+                  leadingIcon={RiPlayCircleLine}
+                  variant="primary"
+                  className="gap-2"
+                  onClick={handleTriggerWorkflow}
+                >
+                  Trigger Workflow
+                </Button>
+              </Protect>
             </motion.div>
           )}
         </motion.div>

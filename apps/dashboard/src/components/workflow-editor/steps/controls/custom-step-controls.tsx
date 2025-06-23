@@ -93,14 +93,14 @@ export const CustomStepControls = (props: CustomStepControlsProps) => {
   }
 
   return (
-    <SidebarContent size="md">
+    <SidebarContent size="md" className="p-0">
       <ConfirmationModal
         open={isRestoreDefaultModalOpen}
         onOpenChange={setIsRestoreDefaultModalOpen}
         onConfirm={async () => {
           const defaultValues = buildDefaultValuesOfDataSchema(step?.controls.dataSchema ?? {});
           reset(defaultValues);
-          saveForm(true);
+          saveForm({ forceSubmit: true });
           setIsRestoreDefaultModalOpen(false);
           setIsOverridden(false);
         }}

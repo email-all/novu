@@ -13,6 +13,8 @@ export type PatchWorkflowDto = {
   name?: string;
   description?: string;
   tags?: string[];
+  payloadSchema?: object;
+  validatePayload?: boolean;
 };
 
 export type ListWorkflowResponse = {
@@ -56,6 +58,9 @@ export type WorkflowResponseDto = WorkflowCommonsFields & {
   status: WorkflowStatusEnum;
   issues?: Record<WorkflowCreateAndUpdateKeys, RuntimeIssueDto>;
   lastTriggeredAt?: string;
+  payloadSchema?: Record<string, any>;
+  payloadExample?: object;
+  validatePayload?: boolean;
 };
 
 export type WorkflowCreateAndUpdateKeys = keyof CreateWorkflowDto | keyof UpdateWorkflowDto;
@@ -82,6 +87,10 @@ export type CreateWorkflowDto = WorkflowCommonsFields & {
   __source: WorkflowCreationSourceEnum;
 
   preferences?: PreferencesRequestDto;
+
+  payloadSchema?: object;
+
+  validatePayload?: boolean;
 };
 
 export type UpdateWorkflowDto = WorkflowCommonsFields & {
@@ -95,6 +104,10 @@ export type UpdateWorkflowDto = WorkflowCommonsFields & {
   preferences: PreferencesRequestDto;
 
   origin: WorkflowOriginEnum;
+
+  payloadSchema?: object;
+
+  validatePayload?: boolean;
 };
 
 export type UpsertWorkflowBody = Omit<UpdateWorkflowDto, 'steps'> & {

@@ -10,19 +10,24 @@ import {
   Query,
   UseGuards,
   Headers,
-  BadRequestException,
 } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { AuthGuard } from '@nestjs/passport';
 import { SubscriberEntity } from '@novu/dal';
-import { MessageActionStatusEnum, PreferenceLevelEnum } from '@novu/shared';
+import {
+  AddressingTypeEnum,
+  MessageActionStatusEnum,
+  PreferenceLevelEnum,
+  TriggerRequestCategoryEnum,
+  UserSessionData,
+} from '@novu/shared';
 
 import { SubscriberDto, SubscriberSessionRequestDto } from './dtos/subscriber-session-request.dto';
 import { SubscriberSessionResponseDto } from './dtos/subscriber-session-response.dto';
 import { SessionCommand } from './usecases/session/session.command';
 import { Session } from './usecases/session/session.usecase';
 import { ApiCommonResponses } from '../shared/framework/response.decorator';
-import { SubscriberSession } from '../shared/framework/user.decorator';
+import { SubscriberSession, UserSession } from '../shared/framework/user.decorator';
 import { GetNotificationsRequestDto } from './dtos/get-notifications-request.dto';
 import { GetNotifications } from './usecases/get-notifications/get-notifications.usecase';
 import { GetNotificationsCommand } from './usecases/get-notifications/get-notifications.command';
@@ -52,6 +57,14 @@ import { SnoozeNotificationCommand } from './usecases/snooze-notification/snooze
 import { SnoozeNotification } from './usecases/snooze-notification/snooze-notification.usecase';
 import { UnsnoozeNotificationCommand } from './usecases/unsnooze-notification/unsnooze-notification.command';
 import { UnsnoozeNotification } from './usecases/unsnooze-notification/unsnooze-notification.usecase';
+import { BulkUpdatePreferencesRequestDto } from './dtos/bulk-update-preferences-request.dto';
+import { BulkUpdatePreferences } from './usecases/bulk-update-preferences/bulk-update-preferences.usecase';
+import { BulkUpdatePreferencesCommand } from './usecases/bulk-update-preferences/bulk-update-preferences.command';
+import { KeylessAccessible } from '../shared/framework/swagger/keyless.security';
+import { TriggerEventResponseDto } from '../events/dtos/trigger-event-response.dto';
+import { TriggerEventRequestDto } from '../events/dtos';
+import { ParseEventRequest } from '../events/usecases/parse-event-request/parse-event-request.usecase';
+import { ParseEventRequestMulticastCommand } from '../events/usecases/parse-event-request';
 
 @ApiCommonResponses()
 @Controller('/inbox')
@@ -66,28 +79,21 @@ export class InboxController {
     private updateAllNotifications: UpdateAllNotifications,
     private getInboxPreferencesUsecase: GetInboxPreferences,
     private updatePreferencesUsecase: UpdatePreferences,
+    private bulkUpdatePreferencesUsecase: BulkUpdatePreferences,
     private snoozeNotificationUsecase: SnoozeNotification,
-    private unsnoozeNotificationUsecase: UnsnoozeNotification
+    private unsnoozeNotificationUsecase: UnsnoozeNotification,
+    private parseEventRequest: ParseEventRequest
   ) {}
 
+  @KeylessAccessible()
   @Post('/session')
   async sessionInitialize(
     @Body() body: SubscriberSessionRequestDto,
     @Headers('origin') origin: string
   ): Promise<SubscriberSessionResponseDto> {
-    // TODO: Backward compatibility support - remove in future versions (see NV-5801)
-    const subscriber: SubscriberDto | {} =
-      typeof body.subscriber === 'string' ? { subscriberId: body.subscriber } : body.subscriber || {};
-    const subscriberId: string | undefined = body.subscriberId || (subscriber as SubscriberDto).subscriberId;
-
     return await this.initializeSessionUsecase.execute(
       SessionCommand.create({
-        subscriber: {
-          ...subscriber,
-          subscriberId,
-        } satisfies SubscriberDto,
-        applicationIdentifier: body.applicationIdentifier,
-        subscriberHash: body.subscriberHash,
+        requestData: body,
         origin,
       })
     );
@@ -111,6 +117,7 @@ export class InboxController {
         read: query.read,
         archived: query.archived,
         snoozed: query.snoozed,
+        data: query.data,
       })
     );
   }
@@ -312,11 +319,31 @@ export class InboxController {
     );
   }
 
+  /**
+   * IMPORTANT: Make sure this endpoint route is defined before the single workflow preference update endpoint
+   * "PATCH /preferences/:workflowIdOrIdentifier", otherwise, the single workflow preference update endpoint will be triggered instead
+   */
   @UseGuards(AuthGuard('subscriberJwt'))
-  @Patch('/preferences/:workflowId')
+  @Patch('/preferences/bulk')
+  async bulkUpdateWorkflowPreferences(
+    @SubscriberSession() subscriberSession: SubscriberEntity,
+    @Body() body: BulkUpdatePreferencesRequestDto
+  ): Promise<GetPreferencesResponseDto[]> {
+    return await this.bulkUpdatePreferencesUsecase.execute(
+      BulkUpdatePreferencesCommand.create({
+        organizationId: subscriberSession._organizationId,
+        subscriberId: subscriberSession.subscriberId,
+        environmentId: subscriberSession._environmentId,
+        preferences: body.preferences,
+      })
+    );
+  }
+
+  @UseGuards(AuthGuard('subscriberJwt'))
+  @Patch('/preferences/:workflowIdOrIdentifier')
   async updateWorkflowPreference(
     @SubscriberSession() subscriberSession: SubscriberEntity,
-    @Param('workflowId') workflowId: string,
+    @Param('workflowIdOrIdentifier') workflowIdOrIdentifier: string,
     @Body() body: UpdatePreferencesRequestDto
   ): Promise<InboxPreference> {
     return await this.updatePreferencesUsecase.execute(
@@ -330,7 +357,7 @@ export class InboxController {
         in_app: body.in_app,
         push: body.push,
         sms: body.sms,
-        workflowId,
+        workflowIdOrIdentifier,
         includeInactiveChannels: false,
       })
     );
@@ -350,6 +377,7 @@ export class InboxController {
         subscriberId: subscriberSession.subscriberId,
         from: {
           tags: body.tags,
+          data: body.data,
         },
         to: {
           read: true,
@@ -372,6 +400,7 @@ export class InboxController {
         environmentId: subscriberSession._environmentId,
         from: {
           tags: body.tags,
+          data: body.data,
         },
         to: {
           archived: true,
@@ -395,11 +424,41 @@ export class InboxController {
         from: {
           tags: body.tags,
           read: true,
+          data: body.data,
         },
         to: {
           archived: true,
         },
       })
     );
+  }
+
+  @KeylessAccessible()
+  @UseGuards(AuthGuard('subscriberJwt'))
+  @Post('/events')
+  async keylessEvents(
+    @UserSession() user: UserSessionData,
+    @Body() body: TriggerEventRequestDto
+  ): Promise<TriggerEventResponseDto> {
+    const result = await this.parseEventRequest.execute(
+      ParseEventRequestMulticastCommand.create({
+        userId: user._id,
+        environmentId: user.environmentId,
+        organizationId: user.organizationId,
+        identifier: body.name,
+        payload: body.payload || {},
+        overrides: body.overrides || {},
+        to: body.to,
+        actor: body.actor,
+        tenant: body.tenant,
+        transactionId: body.transactionId,
+        addressingType: AddressingTypeEnum.MULTICAST,
+        requestCategory: TriggerRequestCategoryEnum.SINGLE,
+        bridgeUrl: body.bridgeUrl,
+        controls: body.controls,
+      })
+    );
+
+    return result as unknown as TriggerEventResponseDto;
   }
 }

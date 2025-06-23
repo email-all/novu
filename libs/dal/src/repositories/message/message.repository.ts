@@ -1,4 +1,3 @@
-import { FilterQuery, QueryWithHelpers, Types, UpdateQuery } from 'mongoose';
 import {
   ActorTypeEnum,
   ButtonTypeEnum,
@@ -6,23 +5,54 @@ import {
   MessageActionStatusEnum,
   MessagesStatusEnum,
 } from '@novu/shared';
+import { FilterQuery, Types } from 'mongoose';
 
-import { BaseRepository } from '../base-repository';
-import { MessageDBModel, MessageEntity } from './message.entity';
-import { Message } from './message.schema';
-import { FeedRepository } from '../feed';
 import { DalException } from '../../shared';
 import { EnforceEnvId } from '../../types/enforce';
+import { BaseRepository } from '../base-repository';
+import { FeedRepository } from '../feed';
+import { MessageDBModel, MessageEntity } from './message.entity';
+import { Message } from './message.schema';
 
 type MessageQuery = FilterQuery<MessageDBModel>;
 
-const getEntries = (obj: object, prefix = '') =>
-  Object.entries(obj).flatMap(([key, value]) =>
-    Object(value) === value ? getEntries(value, `${prefix}${key}.`) : [[`${prefix}${key}`, value]]
-  );
+const MAX_PAYLOAD_QUERY_DEPTH = 3;
+
+const DANGEROUS_KEYS = ['__proto__', 'constructor', 'prototype'];
+
+const isValidKey = (key: string): boolean => {
+  // Reject keys starting with '$' or '.' to prevent MongoDB operator injection.
+  if (key.startsWith('$') || key.startsWith('.')) {
+    return false;
+  }
+
+  // Reject known prototype pollution vectors.
+  if (DANGEROUS_KEYS.includes(key)) {
+    return false;
+  }
+
+  return true;
+};
+
+const getEntries = (obj: object, prefix = '', currentDepth = 0, maxDepth: number): [string, any][] =>
+  Object.entries(obj).flatMap(([key, value]) => {
+    // Sanitize the key before using it.
+    if (!isValidKey(key)) {
+      // Skip this entry if the key is invalid to prevent pollution or injection.
+      return [];
+    }
+
+    const newKeySegment = prefix ? `${prefix}.${key}` : key;
+
+    if (currentDepth < maxDepth && typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      return getEntries(value, newKeySegment, currentDepth + 1, maxDepth);
+    } else {
+      return [[newKeySegment, value]];
+    }
+  });
 
 const getFlatObject = (obj: object) => {
-  return Object.fromEntries(getEntries(obj));
+  return Object.fromEntries(getEntries(obj, '', 0, MAX_PAYLOAD_QUERY_DEPTH));
 };
 
 export class MessageRepository extends BaseRepository<MessageDBModel, MessageEntity, EnforceEnvId> {
@@ -43,6 +73,7 @@ export class MessageRepository extends BaseRepository<MessageDBModel, MessageEnt
       archived?: boolean;
       snoozed?: boolean;
       payload?: object;
+      data?: Record<string, unknown>;
     } = {},
     createdAt?: {
       $gte: Date;
@@ -96,9 +127,11 @@ export class MessageRepository extends BaseRepository<MessageDBModel, MessageEnt
     }
 
     if (query.snoozed != null) {
-      requestQuery.snoozedUntil = { $exists: true, $ne: null };
-    } else {
-      requestQuery.snoozedUntil = { $exists: false };
+      if (query.snoozed) {
+        requestQuery.snoozedUntil = { $ne: null };
+      } else {
+        requestQuery.$or = [{ snoozedUntil: { $exists: false } }, { snoozedUntil: null }];
+      }
     }
 
     if (createdAt != null) {
@@ -107,8 +140,15 @@ export class MessageRepository extends BaseRepository<MessageDBModel, MessageEnt
 
     if (query.payload) {
       requestQuery = {
-        ...requestQuery,
         ...getFlatObject({ payload: query.payload }),
+        ...requestQuery,
+      };
+    }
+
+    if (query.data) {
+      requestQuery = {
+        ...getFlatObject({ data: query.data }),
+        ...requestQuery,
       };
     }
 
@@ -154,6 +194,7 @@ export class MessageRepository extends BaseRepository<MessageDBModel, MessageEnt
       read,
       archived,
       snoozed,
+      data,
     }: {
       environmentId: string;
       subscriberId: string;
@@ -162,10 +203,11 @@ export class MessageRepository extends BaseRepository<MessageDBModel, MessageEnt
       read?: boolean;
       archived?: boolean;
       snoozed?: boolean;
+      data?: Record<string, unknown>;
     },
     options: { limit: number; offset: number; after?: string }
   ) {
-    const query: MessageQuery & EnforceEnvId = {
+    let query: MessageQuery & EnforceEnvId = {
       _environmentId: environmentId,
       _subscriberId: subscriberId,
       channel,
@@ -193,6 +235,15 @@ export class MessageRepository extends BaseRepository<MessageDBModel, MessageEnt
 
     if (typeof snoozed === 'boolean') {
       query.snoozedUntil = snoozed ? { $exists: true, $ne: null } : { $eq: null };
+    }
+
+    if (data) {
+      const flatData = getFlatObject({ data });
+
+      query = {
+        ...flatData,
+        ...query,
+      };
     }
 
     return await this.cursorPagination({
@@ -229,6 +280,7 @@ export class MessageRepository extends BaseRepository<MessageDBModel, MessageEnt
       archived?: boolean;
       snoozed?: boolean;
       payload?: object;
+      data?: Record<string, unknown>;
     } = {},
     options: { limit: number; skip?: number } = { limit: 100, skip: 0 },
     createdAt?: {
@@ -247,6 +299,7 @@ export class MessageRepository extends BaseRepository<MessageDBModel, MessageEnt
         archived: query.archived,
         payload: query.payload,
         snoozed: query.snoozed,
+        data: query.data,
       },
       createdAt
     );
@@ -524,6 +577,7 @@ export class MessageRepository extends BaseRepository<MessageDBModel, MessageEnt
     subscriberId: string;
     from: {
       tags?: string[];
+      data?: Record<string, unknown>;
       seen?: boolean;
       read?: boolean;
       archived?: boolean;
@@ -537,7 +591,10 @@ export class MessageRepository extends BaseRepository<MessageDBModel, MessageEnt
     const isFromSeen = from.seen !== undefined;
     const isFromRead = from.read !== undefined;
     const isFromArchived = from.archived !== undefined;
+    const flatData = from.data ? getFlatObject({ data: from.data }) : {};
+
     const query: MessageQuery & EnforceEnvId = {
+      ...flatData,
       _environmentId: environmentId,
       _subscriberId: subscriberId,
       ...(from.tags && from.tags?.length > 0 && { tags: { $in: from.tags } }),
@@ -754,8 +811,14 @@ export class MessageRepository extends BaseRepository<MessageDBModel, MessageEnt
       skip: options?.skip,
     })
       .read('secondaryPreferred')
-      .populate('subscriber', '_id firstName lastName avatar subscriberId')
-      .populate('actorSubscriber', '_id firstName lastName avatar subscriberId');
+      .populate(
+        'subscriber',
+        '_id firstName lastName avatar subscriberId createdAt updatedAt _organizationId _environmentId deleted'
+      )
+      .populate(
+        'actorSubscriber',
+        '_id firstName lastName avatar subscriberId createdAt updatedAt _organizationId _environmentId deleted'
+      );
 
     return this.mapEntities(data);
   }

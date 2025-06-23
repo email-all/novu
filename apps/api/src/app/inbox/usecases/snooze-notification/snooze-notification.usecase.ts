@@ -1,17 +1,10 @@
+import { Injectable, NotFoundException, InternalServerErrorException, HttpException, HttpStatus } from '@nestjs/common';
 import {
-  Injectable,
-  NotFoundException,
-  InternalServerErrorException,
-  HttpException,
-  NotImplementedException,
-  HttpStatus,
-} from '@nestjs/common';
-import {
+  AnalyticsService,
   CreateExecutionDetails,
   CreateExecutionDetailsCommand,
   DetailEnum,
   StandardQueueService,
-  FeatureFlagsService,
   PinoLogger,
 } from '@novu/application-generic';
 import {
@@ -20,8 +13,6 @@ import {
   MessageRepository,
   MessageEntity,
   OrganizationEntity,
-  EnvironmentEntity,
-  UserEntity,
   CommunityOrganizationRepository,
 } from '@novu/dal';
 import {
@@ -29,7 +20,6 @@ import {
   ChannelTypeEnum,
   ExecutionDetailsSourceEnum,
   ExecutionDetailsStatusEnum,
-  FeatureFlagsKeysEnum,
   FeatureNameEnum,
   getFeatureForTierAsNumber,
   JobStatusEnum,
@@ -39,6 +29,7 @@ import { SnoozeNotificationCommand } from './snooze-notification.command';
 import { MarkNotificationAs } from '../mark-notification-as/mark-notification-as.usecase';
 import { MarkNotificationAsCommand } from '../mark-notification-as/mark-notification-as.command';
 import { InboxNotification } from '../../utils/types';
+import { AnalyticsEventsEnum } from '../../utils';
 
 @Injectable()
 export class SnoozeNotification {
@@ -52,7 +43,7 @@ export class SnoozeNotification {
     private organizationRepository: CommunityOrganizationRepository,
     private createExecutionDetails: CreateExecutionDetails,
     private markNotificationAs: MarkNotificationAs,
-    private featureFlagsService: FeatureFlagsService
+    private analyticsService: AnalyticsService
   ) {}
 
   public async execute(command: SnoozeNotificationCommand): Promise<InboxNotification> {
@@ -86,8 +77,16 @@ export class SnoozeNotification {
           this.logger.error({ err: error }, 'Failed to create execution details');
         });
 
+      this.analyticsService.mixpanelTrack(AnalyticsEventsEnum.SNOOZE_NOTIFICATION, '', {
+        _organization: command.organizationId,
+        _notification: command.notificationId,
+        _subscriber: notification._subscriberId,
+        snoozeUntil: command.snoozeUntil,
+      });
+
       return snoozedNotification;
     } catch (error) {
+      this.logger.error({ error }, 'Failed to snooze notification');
       throw new InternalServerErrorException(`Failed to snooze notification: ${error.message}`);
     }
   }
@@ -111,18 +110,6 @@ export class SnoozeNotification {
   }
 
   private async validateSnoozeDuration(command: SnoozeNotificationCommand, snoozeDurationMs: number) {
-    const isSnoozeEnabled = await this.featureFlagsService.getFlag({
-      key: FeatureFlagsKeysEnum.IS_SNOOZE_ENABLED,
-      defaultValue: false,
-      organization: { _id: command.organizationId } as OrganizationEntity,
-      environment: { _id: command.environmentId } as EnvironmentEntity,
-      user: { _id: command.subscriberId } as UserEntity,
-    });
-
-    if (!isSnoozeEnabled) {
-      throw new NotImplementedException();
-    }
-
     const organization = await this.getOrganization(command.organizationId);
 
     const tierLimitMs = getFeatureForTierAsNumber(

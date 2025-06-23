@@ -1,13 +1,13 @@
 /* eslint-disable no-param-reassign */
 import { render as mailyRender, JSONContent as MailyJSONContent } from '@maily-to/render';
 import { Injectable } from '@nestjs/common';
-import { EmailRenderOutput, FeatureFlagsKeysEnum } from '@novu/shared';
-import { FeatureFlagsService, InstrumentUsecase, sanitizeHTML } from '@novu/application-generic';
-import { EnvironmentEntity } from '@novu/dal';
+import { EmailRenderOutput } from '@novu/shared';
+import { InstrumentUsecase, sanitizeHTML } from '@novu/application-generic';
+import { createLiquidEngine } from '@novu/framework/internal';
 
+import { Liquid } from 'liquidjs';
 import { FullPayloadForRender, RenderCommand } from './render-command';
 import { MailyAttrsEnum } from '../../../shared/helpers/maily.types';
-import { parseLiquid } from '../../../shared/helpers/liquid';
 import {
   hasShow,
   isButtonNode,
@@ -17,24 +17,36 @@ import {
   isVariableNode,
   wrapMailyInLiquid,
 } from '../../../shared/helpers/maily-utils';
+import { NOVU_BRANDING_HTML } from './novu-branding-html';
+import { GetOrganizationSettings } from '../../../organization/usecases/get-organization-settings/get-organization-settings.usecase';
+import { GetOrganizationSettingsCommand } from '../../../organization/usecases/get-organization-settings/get-organization-settings.command';
 
 type MailyJSONMarks = NonNullable<MailyJSONContent['marks']>[number];
 
 export class EmailOutputRendererCommand extends RenderCommand {
   environmentId: string;
+  organizationId: string;
+}
+
+function isJsonString(str: string): boolean {
+  try {
+    JSON.parse(str);
+  } catch (e) {
+    return false;
+  }
+
+  return true;
 }
 
 @Injectable()
 export class EmailOutputRendererUsecase {
-  constructor(private readonly featureFlagService: FeatureFlagsService) {}
+  private readonly liquidEngine: Liquid;
 
+  constructor(private getOrganizationSettings: GetOrganizationSettings) {
+    this.liquidEngine = createLiquidEngine();
+  }
   @InstrumentUsecase()
   async execute(renderCommand: EmailOutputRendererCommand): Promise<EmailRenderOutput> {
-    const isEnhancedDigestEnabled = await this.featureFlagService.getFlag({
-      environment: { _id: renderCommand.environmentId } as EnvironmentEntity,
-      key: FeatureFlagsKeysEnum.IS_ENHANCED_DIGEST_ENABLED,
-      defaultValue: false,
-    });
     const { body, subject: controlSubject, disableOutputSanitization } = renderCommand.controlValues;
 
     if (!body || typeof body !== 'string') {
@@ -49,19 +61,20 @@ export class EmailOutputRendererUsecase {
       };
     }
 
-    const liquifiedMaily = wrapMailyInLiquid(body);
-    const transformedMaily = await this.transformMailyContent(
-      liquifiedMaily,
-      renderCommand.fullPayloadForRender,
-      isEnhancedDigestEnabled
-    );
-    const parsedMaily = await this.parseMailyContentByLiquid(
-      transformedMaily,
-      renderCommand.fullPayloadForRender,
-      isEnhancedDigestEnabled
-    );
-    const strippedMaily = this.removeTrailingEmptyLines(parsedMaily);
-    const renderedHtml = await mailyRender(strippedMaily);
+    let renderedHtml: string;
+
+    if (typeof body === 'object' || (typeof body === 'string' && isJsonString(body))) {
+      const liquifiedMaily = wrapMailyInLiquid(body);
+      const transformedMaily = await this.transformMailyContent(liquifiedMaily, renderCommand.fullPayloadForRender);
+      const parsedMaily = await this.parseMailyContentByLiquid(transformedMaily, renderCommand.fullPayloadForRender);
+      const strippedMaily = this.removeTrailingEmptyLines(parsedMaily);
+      renderedHtml = await mailyRender(strippedMaily);
+    } else {
+      renderedHtml = await this.liquidEngine.parseAndRender(body, renderCommand.fullPayloadForRender);
+    }
+
+    // Add Novu branding if 'removeNovuBranding' is false
+    const htmlWithBranding = await this.appendNovuBranding(renderedHtml, renderCommand.organizationId);
 
     /**
      * Force type mapping in case undefined control.
@@ -71,10 +84,10 @@ export class EmailOutputRendererUsecase {
     const subject = controlSubject as string;
 
     if (disableOutputSanitization) {
-      return { subject, body: renderedHtml };
+      return { subject, body: htmlWithBranding };
     }
 
-    return { subject: sanitizeHTML(subject), body: sanitizeHTML(renderedHtml) };
+    return { subject: sanitizeHTML(subject), body: sanitizeHTML(htmlWithBranding) };
   }
 
   private removeTrailingEmptyLines(node: MailyJSONContent): MailyJSONContent {
@@ -103,10 +116,9 @@ export class EmailOutputRendererUsecase {
 
   private async parseMailyContentByLiquid(
     mailyContent: MailyJSONContent,
-    variables: FullPayloadForRender,
-    isEnhancedDigestEnabled: boolean
+    variables: FullPayloadForRender
   ): Promise<MailyJSONContent> {
-    const parsedString = await parseLiquid(JSON.stringify(mailyContent), variables, isEnhancedDigestEnabled);
+    const parsedString = await this.liquidEngine.parseAndRender(JSON.stringify(mailyContent), variables);
 
     return JSON.parse(parsedString);
   }
@@ -114,7 +126,6 @@ export class EmailOutputRendererUsecase {
   private async transformMailyContent(
     node: MailyJSONContent,
     variables: FullPayloadForRender,
-    isEnhancedDigestEnabled: boolean,
     parent?: MailyJSONContent
   ) {
     const queue: Array<{ node: MailyJSONContent; parent?: MailyJSONContent }> = [{ node, parent }];
@@ -123,7 +134,7 @@ export class EmailOutputRendererUsecase {
       const current = queue.shift()!;
 
       if (hasShow(current.node)) {
-        const shouldShow = await this.handleShowNode(current.node, variables, isEnhancedDigestEnabled, current.parent);
+        const shouldShow = await this.handleShowNode(current.node, variables, current.parent);
 
         if (!shouldShow) {
           continue;
@@ -131,7 +142,7 @@ export class EmailOutputRendererUsecase {
       }
 
       if (isRepeatNode(current.node)) {
-        await this.handleEachNode(current.node, variables, isEnhancedDigestEnabled, current.parent);
+        await this.handleEachNode(current.node, variables, current.parent);
       }
 
       if (isVariableNode(current.node)) {
@@ -151,10 +162,9 @@ export class EmailOutputRendererUsecase {
   private async handleShowNode(
     node: MailyJSONContent & { attrs: { [MailyAttrsEnum.SHOW_IF_KEY]: string } },
     variables: FullPayloadForRender,
-    isEnhancedDigestEnabled: boolean,
     parent?: MailyJSONContent
   ): Promise<boolean> {
-    const shouldShow = await this.evaluateShowCondition(variables, node, isEnhancedDigestEnabled);
+    const shouldShow = await this.evaluateShowCondition(variables, node);
     if (!shouldShow && parent?.content) {
       parent.content = parent.content.filter((pNode) => pNode !== node);
     }
@@ -168,10 +178,9 @@ export class EmailOutputRendererUsecase {
   private async handleEachNode(
     node: MailyJSONContent & { attrs: { [MailyAttrsEnum.EACH_KEY]: string } },
     variables: FullPayloadForRender,
-    isEnhancedDigestEnabled: boolean,
     parent?: MailyJSONContent
   ): Promise<void> {
-    const newContent = await this.multiplyForEachNode(node, variables, isEnhancedDigestEnabled);
+    const newContent = await this.multiplyForEachNode(node, variables);
 
     if (parent?.content) {
       const nodeIndex = parent.content.indexOf(node);
@@ -183,11 +192,10 @@ export class EmailOutputRendererUsecase {
 
   private async evaluateShowCondition(
     variables: FullPayloadForRender,
-    node: MailyJSONContent & { attrs: { [MailyAttrsEnum.SHOW_IF_KEY]: string } },
-    isEnhancedDigestEnabled: boolean
+    node: MailyJSONContent & { attrs: { [MailyAttrsEnum.SHOW_IF_KEY]: string } }
   ): Promise<boolean> {
     const { [MailyAttrsEnum.SHOW_IF_KEY]: showIfKey } = node.attrs;
-    const parsedShowIfValue = await parseLiquid(showIfKey, variables, isEnhancedDigestEnabled);
+    const parsedShowIfValue = await this.liquidEngine.parseAndRender(showIfKey, variables);
 
     return this.stringToBoolean(parsedShowIfValue);
   }
@@ -227,24 +235,19 @@ export class EmailOutputRendererUsecase {
    */
   private async multiplyForEachNode(
     node: MailyJSONContent & { attrs: { [MailyAttrsEnum.EACH_KEY]: string } },
-    variables: FullPayloadForRender,
-    isEnhancedDigestEnabled: boolean
+    variables: FullPayloadForRender
   ): Promise<MailyJSONContent[]> {
     const iterablePath = node.attrs[MailyAttrsEnum.EACH_KEY];
     const iterations = node.attrs[MailyAttrsEnum.ITERATIONS_KEY];
     const forEachNodes = node.content || [];
-    const iterableArray = await this.getIterableArray(iterablePath, variables, isEnhancedDigestEnabled);
+    const iterableArray = await this.getIterableArray(iterablePath, variables);
     const limitedIterableArray = iterations ? iterableArray.slice(0, iterations) : iterableArray;
 
     return limitedIterableArray.flatMap((_, index) => this.processForEachNodes(forEachNodes, iterablePath, index));
   }
 
-  private async getIterableArray(
-    iterablePath: string,
-    variables: FullPayloadForRender,
-    isEnhancedDigestEnabled: boolean
-  ): Promise<unknown[]> {
-    const iterableArrayString = await parseLiquid(iterablePath, variables, isEnhancedDigestEnabled);
+  private async getIterableArray(iterablePath: string, variables: FullPayloadForRender): Promise<unknown[]> {
+    const iterableArrayString = await this.liquidEngine.parseAndRender(iterablePath, variables);
 
     try {
       const parsedArray = JSON.parse(iterableArrayString.replace(/'/g, '"'));
@@ -360,5 +363,40 @@ export class EmailOutputRendererUsecase {
     } catch {
       return Boolean(normalized);
     }
+  }
+
+  private async appendNovuBranding(html: string, organizationId: string): Promise<string> {
+    try {
+      const { removeNovuBranding } = await this.getOrganizationSettings.execute(
+        GetOrganizationSettingsCommand.create({
+          organizationId,
+        })
+      );
+
+      if (removeNovuBranding) {
+        return html;
+      }
+
+      return this.insertBrandingHtml(html);
+    } catch (error) {
+      // If there's any error fetching organization, return original HTML to avoid breaking emails
+      return html;
+    }
+  }
+
+  private insertBrandingHtml(html: string): string {
+    const matches = [...html.matchAll(/<\/body>/gi)];
+
+    if (matches.length === 0) {
+      if (html?.trim()) {
+        return html + NOVU_BRANDING_HTML;
+      } else {
+        return html;
+      }
+    }
+
+    const lastIndex = matches[matches.length - 1].index!;
+
+    return html.slice(0, lastIndex) + NOVU_BRANDING_HTML + html.slice(lastIndex);
   }
 }

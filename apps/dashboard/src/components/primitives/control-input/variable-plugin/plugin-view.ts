@@ -5,6 +5,7 @@ import { isTypingVariable } from './utils';
 import { VariablePillWidget } from './variable-pill-widget';
 import { parseVariable } from '@/utils/liquid';
 import { VARIABLE_REGEX_STRING } from '@/utils/liquid';
+import { isVariableInLocalContext } from '@/utils/liquid-scope-analyzer';
 
 export class VariablePluginView {
   decorations: DecorationSet;
@@ -18,9 +19,9 @@ export class VariablePluginView {
     private viewRef: MutableRefObject<EditorView | null>,
     private lastCompletionRef: MutableRefObject<{ from: number; to: number } | null>,
     private isAllowedVariable: IsAllowedVariable,
-    private isEnhancedDigestEnabled: boolean,
     private onSelect?: (value: string, from: number, to: number) => void,
-    private isDigestEventsVariable?: (variableName: string) => boolean
+    private isDigestEventsVariable?: (variableName: string) => boolean,
+    private isCustomHtmlEditorEnabled: boolean = false
   ) {
     this.decorations = this.createDecorations(view);
     viewRef.current = view;
@@ -66,9 +67,10 @@ export class VariablePluginView {
         continue;
       }
 
-      if (!this.isAllowedVariable({ name })) {
-        continue;
-      }
+      // Check if the variable is allowed (in schema or in local context)
+      const isAllowed =
+        this.isAllowedVariable({ name }) ||
+        (this.isCustomHtmlEditorEnabled && isVariableInLocalContext(content, name, start));
 
       if (name) {
         decorations.push(
@@ -79,9 +81,9 @@ export class VariablePluginView {
               start,
               end,
               filtersArray,
-              this.isEnhancedDigestEnabled,
               this.onSelect,
-              this.isDigestEventsVariable
+              this.isDigestEventsVariable,
+              !isAllowed // Pass whether the variable is NOT in schema
             ),
             inclusive: false,
             side: -1,

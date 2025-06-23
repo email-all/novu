@@ -10,6 +10,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import { useEffect } from 'react';
 import { createSearchParams, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
+import { showErrorToast } from '@/components/primitives/sonner-helpers';
 import { useFetchActivities } from '../../hooks/use-fetch-activities';
 import { ActivityEmptyState } from './activity-empty-state';
 import { ArrowPagination } from './components/arrow-pagination';
@@ -23,6 +24,7 @@ export interface ActivityTableProps {
   hasActiveFilters: boolean;
   onClearFilters: () => void;
   isLoading?: boolean;
+  onTriggerWorkflow?: () => void;
 }
 
 export function ActivityTable({
@@ -31,6 +33,7 @@ export function ActivityTable({
   filters,
   hasActiveFilters,
   onClearFilters,
+  onTriggerWorkflow,
 }: ActivityTableProps) {
   const [searchParams] = useSearchParams();
   const location = useLocation();
@@ -48,9 +51,10 @@ export function ActivityTable({
 
   useEffect(() => {
     if (error) {
-      toast.error('Failed to fetch activities', {
-        description: error instanceof Error ? error.message : 'There was an error loading the activities.',
-      });
+      showErrorToast(
+        error instanceof Error ? error.message : 'There was an error loading the activities.',
+        'Failed to fetch activities'
+      );
     }
   }, [error]);
 
@@ -73,7 +77,12 @@ export function ActivityTable({
           transition={{ duration: 0.2 }}
           className="flex h-full w-full items-center justify-center"
         >
-          <ActivityEmptyState filters={filters} emptySearchResults={hasActiveFilters} onClearFilters={onClearFilters} />
+          <ActivityEmptyState
+            filters={filters}
+            emptySearchResults={hasActiveFilters}
+            onClearFilters={onClearFilters}
+            onTriggerWorkflow={onTriggerWorkflow}
+          />
         </motion.div>
       ) : (
         <motion.div

@@ -2,6 +2,8 @@ import { validateEnhancedDigestFilters, getFirstFilterAndItsArgs } from '@/compo
 import { WidgetType } from '@uiw/react-codemirror';
 import { CSSProperties } from 'react';
 
+export const DEFAULT_VARIABLE_PILL_HEIGHT = 18;
+
 export class VariablePillWidget extends WidgetType {
   private clickHandler: (e: MouseEvent) => void;
   private tooltipElement: HTMLElement | null = null;
@@ -12,9 +14,9 @@ export class VariablePillWidget extends WidgetType {
     private start: number,
     private end: number,
     private filters: string[],
-    private isEnhancedDigestEnabled: boolean,
     private onSelect?: (value: string, from: number, to: number) => void,
-    private isDigestEventsVariable?: (variableName: string) => boolean
+    private isDigestEventsVariable?: (variableName: string) => boolean,
+    private isNotInSchema: boolean = false
   ) {
     super();
 
@@ -42,10 +44,11 @@ export class VariablePillWidget extends WidgetType {
       width: 'calc(1rem - 2px)',
       minWidth: 'calc(1rem - 2px)',
       height: 'calc(1rem - 2px)',
-      backgroundImage: `url("/images/code.svg")`,
+      backgroundImage: this.isNotInSchema ? `url("/images/error-warning-line.svg")` : `url("/images/code.svg")`,
       backgroundRepeat: 'no-repeat',
       backgroundPosition: 'center',
       backgroundSize: 'contain',
+      color: this.isNotInSchema ? 'hsl(var(--error-base))' : undefined,
     };
   }
 
@@ -71,7 +74,7 @@ export class VariablePillWidget extends WidgetType {
       fontFamily: 'var(--font-code)',
       display: 'inline-flex',
       alignItems: 'center',
-      height: '18px',
+      height: `${DEFAULT_VARIABLE_PILL_HEIGHT}px`,
       lineHeight: 'inherit',
       fontSize: 'max(12px, calc(1em - 3px))',
       cursor: 'pointer',
@@ -143,58 +146,61 @@ export class VariablePillWidget extends WidgetType {
 
     span.addEventListener('mousedown', this.clickHandler);
 
-    if (this.isEnhancedDigestEnabled) {
-      content.textContent = this.getDisplayVariableName();
+    content.textContent = this.getDisplayVariableName();
 
-      const hasIssues = !!this.getVariableIssues();
+    const hasIssues = !!this.getVariableIssues();
 
-      if (hasIssues) {
-        before.style.color = 'hsl(var(--error-base))';
-        before.style.backgroundImage = `url("/images/error-warning-line.svg")`;
-      }
+    if (hasIssues) {
+      before.style.color = 'hsl(var(--error-base))';
+      before.style.backgroundImage = `url("/images/error-warning-line.svg")`;
+    } else if (this.isNotInSchema) {
+      before.style.color = 'hsl(var(--error-base))';
+    }
 
-      this.renderFilters(span);
+    this.renderFilters(span);
 
-      span.addEventListener('mouseenter', () => {
-        if (!this.tooltipElement) {
-          const issues = this.getVariableIssues();
-          if (!issues) return;
+    span.addEventListener('mouseenter', () => {
+      if (!this.tooltipElement) {
+        const issues = this.getVariableIssues();
 
+        if (issues) {
           this.tooltipElement = this.renderTooltip({
             parent: span,
             content: `${issues.name}: ${issues.message}`,
             type: 'error',
           });
           this.tooltipElement.setAttribute('data-state', 'open');
+        } else if (this.isNotInSchema) {
+          this.tooltipElement = this.renderTooltip({
+            parent: span,
+            content: "Variable schema doesn't exist",
+            type: 'error',
+          });
+          this.tooltipElement.setAttribute('data-state', 'open');
         }
-
-        if (hasIssues) {
-          span.style.backgroundColor = 'hsl(var(--error-base) / 0.025)';
-        }
-      });
-
-      span.addEventListener('mouseleave', () => {
-        if (this.tooltipElement) {
-          this.tooltipElement.setAttribute('data-state', 'closed');
-
-          setTimeout(() => {
-            if (this.tooltipElement) {
-              document.body.removeChild(this.tooltipElement);
-              this.tooltipElement = null;
-            }
-          }, 150);
-        }
-
-        span.style.backgroundColor = 'hsl(var(--bg-white))';
-      });
-    } else {
-      if (this.filters?.length) {
-        const after = document.createElement('span');
-        const afterStyles = this.createAfterStyles();
-        Object.assign(after.style, afterStyles);
-        span.appendChild(after);
       }
-    }
+
+      if (hasIssues) {
+        span.style.backgroundColor = 'hsl(var(--error-base) / 0.025)';
+      } else if (this.isNotInSchema) {
+        span.style.backgroundColor = 'hsl(var(--error-base) / 0.025)';
+      }
+    });
+
+    span.addEventListener('mouseleave', () => {
+      if (this.tooltipElement) {
+        this.tooltipElement.setAttribute('data-state', 'closed');
+
+        setTimeout(() => {
+          if (this.tooltipElement) {
+            document.body.removeChild(this.tooltipElement);
+            this.tooltipElement = null;
+          }
+        }, 150);
+      }
+
+      span.style.backgroundColor = 'hsl(var(--bg-white))';
+    });
 
     return span;
   }
@@ -206,7 +212,6 @@ export class VariablePillWidget extends WidgetType {
 
     if (this.filters?.length > 0) {
       const filterSpan = document.createElement('span');
-      Object.assign(filterSpan.style, this.createFilterParentStyles());
       const filterNameSpan = document.createElement('span');
       filterNameSpan.textContent = `| ${firstFilterName}`;
       Object.assign(filterNameSpan.style, this.createFilterStyles());
@@ -270,7 +275,7 @@ export class VariablePillWidget extends WidgetType {
     parent: HTMLElement;
     prefix?: string;
     content: string;
-    type: 'error' | 'other';
+    type: 'error' | 'other' | 'warning';
   }) {
     const tooltip = document.createElement('div');
     tooltip.className =
@@ -300,6 +305,9 @@ export class VariablePillWidget extends WidgetType {
     if (type === 'error') {
       innerContainer.textContent = content;
       tooltip.style.color = 'hsl(var(--error-base))';
+    } else if (type === 'warning') {
+      innerContainer.textContent = content;
+      tooltip.style.color = 'hsl(var(--warning-base))';
     } else {
       innerContainer.textContent = prefix ?? '';
       innerContainer.style.color = 'hsl(var(--text-soft))';
@@ -314,7 +322,7 @@ export class VariablePillWidget extends WidgetType {
 
   getVariableIssues() {
     if (this.isDigestEventsVariable && this.isDigestEventsVariable(this.variableName)) {
-      const issues = validateEnhancedDigestFilters(this.filters, this.isEnhancedDigestEnabled);
+      const issues = validateEnhancedDigestFilters(this.filters);
 
       return issues;
     }

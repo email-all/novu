@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Optional } from '@nestjs/common';
+import { format } from 'prettier';
 
 import {
   AnalyticsService,
@@ -14,6 +15,9 @@ import {
   UpdateWorkflowCommand,
   UpsertControlValuesCommand,
   UpsertControlValuesUseCase,
+  SendWebhookMessage,
+  EmailControlType,
+  PinoLogger,
 } from '@novu/application-generic';
 import {
   ControlSchemas,
@@ -26,6 +30,9 @@ import {
   ControlValuesLevelEnum,
   DEFAULT_WORKFLOW_PREFERENCES,
   slugify,
+  StepTypeEnum,
+  WebhookEventEnum,
+  WebhookObjectTypeEnum,
   WorkflowCreationSourceEnum,
   WorkflowOriginEnum,
   WorkflowTypeEnum,
@@ -37,6 +44,10 @@ import { BuildStepIssuesUsecase } from '../build-step-issues/build-step-issues.u
 import { GetWorkflowCommand, GetWorkflowUseCase } from '../get-workflow';
 import { UpsertStepDataCommand, UpsertWorkflowCommand } from './upsert-workflow.command';
 import { StepIssuesDto, WorkflowResponseDto } from '../../dtos';
+import { isStringifiedMailyJSONContent } from '../../../shared/helpers/maily-utils';
+import { PreviewUsecase } from '../preview/preview.usecase';
+import { PreviewCommand } from '../preview';
+import { EmailRenderOutput } from '../../dtos/generate-preview-response.dto';
 
 @Injectable()
 export class UpsertWorkflowUseCase {
@@ -49,7 +60,11 @@ export class UpsertWorkflowUseCase {
     private buildStepIssuesUsecase: BuildStepIssuesUsecase,
     private controlValuesRepository: ControlValuesRepository,
     private upsertControlValuesUseCase: UpsertControlValuesUseCase,
-    private analyticsService: AnalyticsService
+    private previewUsecase: PreviewUsecase,
+    private analyticsService: AnalyticsService,
+    private logger: PinoLogger,
+    @Optional()
+    private sendWebhookMessage?: SendWebhookMessage
   ) {}
 
   @InstrumentUsecase()
@@ -84,12 +99,39 @@ export class UpsertWorkflowUseCase {
 
     await this.upsertControlValues(upsertedWorkflow, command);
 
-    return await this.getWorkflowUseCase.execute(
+    const updatedWorkflow = await this.getWorkflowUseCase.execute(
       GetWorkflowCommand.create({
         workflowIdOrInternalId: upsertedWorkflow._id,
         user: command.user,
       })
     );
+
+    if (this.sendWebhookMessage) {
+      if (existingWorkflow) {
+        await this.sendWebhookMessage.execute({
+          eventType: WebhookEventEnum.WORKFLOW_UPDATED,
+          objectType: WebhookObjectTypeEnum.WORKFLOW,
+          payload: {
+            object: updatedWorkflow as unknown as Record<string, unknown>,
+            previousObject: existingWorkflow as unknown as Record<string, unknown>,
+          },
+          organizationId: command.user.organizationId,
+          environmentId: command.user.environmentId,
+        });
+      } else {
+        await this.sendWebhookMessage.execute({
+          eventType: WebhookEventEnum.WORKFLOW_CREATED,
+          objectType: WebhookObjectTypeEnum.WORKFLOW,
+          payload: {
+            object: updatedWorkflow as unknown as Record<string, unknown>,
+          },
+          organizationId: command.user.organizationId,
+          environmentId: command.user.environmentId,
+        });
+      }
+    }
+
+    return updatedWorkflow;
   }
 
   private async buildCreateWorkflowCommand(command: UpsertWorkflowCommand): Promise<CreateWorkflowCommand> {
@@ -119,6 +161,8 @@ export class UpsertWorkflowUseCase {
       defaultPreferences: workflowDto.preferences?.workflow ?? DEFAULT_WORKFLOW_PREFERENCES,
       triggerIdentifier: preserveWorkflowId ? workflowDto.workflowId : slugify(workflowDto.name),
       status: computeWorkflowStatus(isWorkflowActive, steps),
+      payloadSchema: workflowDto.payloadSchema,
+      validatePayload: workflowDto.validatePayload,
     };
   }
 
@@ -145,6 +189,8 @@ export class UpsertWorkflowUseCase {
       tags: workflowDto.tags,
       active: workflowActive,
       status: computeWorkflowStatus(workflowActive, steps),
+      payloadSchema: workflowDto.payloadSchema,
+      validatePayload: workflowDto.validatePayload,
     };
   }
 
@@ -282,28 +328,66 @@ export class UpsertWorkflowUseCase {
       .filter((update): update is NonNullable<typeof update> => update !== null);
   }
 
-  private executeControlValuesUpdate(
-    update: { step: NotificationStepEntity; controlValues: Record<string, unknown> | null; shouldDelete: boolean },
+  private async executeControlValuesUpdate(
+    {
+      shouldDelete,
+      step,
+      controlValues,
+    }: { step: NotificationStepEntity; controlValues: Record<string, unknown> | null; shouldDelete: boolean },
     workflowId: string,
     command: UpsertWorkflowCommand
   ) {
-    if (update.shouldDelete) {
+    if (shouldDelete) {
       return this.controlValuesRepository.delete({
         _environmentId: command.user.environmentId,
         _organizationId: command.user.organizationId,
         _workflowId: workflowId,
-        _stepId: update.step._templateId,
+        _stepId: step._templateId,
         level: ControlValuesLevelEnum.STEP_CONTROLS,
       });
+    }
+
+    const newControlValues = controlValues || {};
+    if (step.template?.type === StepTypeEnum.EMAIL) {
+      const emailControlValues = newControlValues as EmailControlType;
+      const isMaily = isStringifiedMailyJSONContent(emailControlValues.body);
+      if (emailControlValues.editorType === 'html' && isMaily) {
+        const { result } = await this.previewUsecase.execute(
+          PreviewCommand.create({
+            user: command.user,
+            workflowIdOrInternalId: workflowId,
+            stepIdOrInternalId: step._id ?? step.stepId ?? '',
+            generatePreviewRequestDto: {
+              controlValues: emailControlValues,
+            },
+          })
+        );
+        let htmlBody = this.removeBrandingFromHtml((result.preview as EmailRenderOutput).body ?? '');
+        try {
+          htmlBody = await format(htmlBody, {
+            parser: 'html',
+            printWidth: 120,
+            tabWidth: 2,
+            useTabs: false,
+            htmlWhitespaceSensitivity: 'css',
+          });
+        } catch (error) {
+          this.logger.warn({ err: error }, 'Failed to prettify HTML');
+        }
+
+        emailControlValues.body = htmlBody;
+      } else if (emailControlValues.editorType === 'block' && !isMaily) {
+        emailControlValues.body = '';
+      }
     }
 
     return this.upsertControlValuesUseCase.execute(
       UpsertControlValuesCommand.create({
         organizationId: command.user.organizationId,
         environmentId: command.user.environmentId,
-        notificationStepEntity: update.step,
+        notificationStepEntity: step,
         workflowId,
-        newControlValues: update.controlValues || {},
+        newControlValues,
       })
     );
   }
@@ -329,6 +413,14 @@ export class UpsertWorkflowUseCase {
     if (!commandStep) return null;
 
     return commandStep.controlValues;
+  }
+
+  private removeBrandingFromHtml(html: string): string {
+    try {
+      return html.replace(/<table[^>]*data-novu-branding[^>]*>[\s\S]*?<\/table>(\s*)/gi, '');
+    } catch (error) {
+      return html;
+    }
   }
 
   private mixpanelTrack(command: UpsertWorkflowCommand, eventName: string) {

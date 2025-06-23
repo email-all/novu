@@ -34,7 +34,7 @@ export const showSuccessToast = (message: string, title?: string, options: Exter
   });
 };
 
-export const showErrorToast = (message: string, title?: string, options: ExternalToast = {}) => {
+export const showErrorToast = (message: string | ReactNode, title?: string, options: ExternalToast = {}) => {
   showToast({
     title,
     children: () => (
@@ -44,7 +44,7 @@ export const showErrorToast = (message: string, title?: string, options: Externa
       </>
     ),
     options: {
-      position: 'bottom-center',
+      position: 'bottom-right',
       ...options,
     },
   });
